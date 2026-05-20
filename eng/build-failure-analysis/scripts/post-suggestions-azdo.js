@@ -84,18 +84,27 @@ async function main() {
   const prFiles = await ghPaginate(`/pulls/${prNumber}/files`);
   const prFilePaths = new Set(prFiles.map(f => f.filename));
 
-  // Build set of lines in the PR diff
+  // Build mapping from file:line to diff position (1-based offset in the patch).
+  // The GitHub review comments API requires `position` (the line index within
+  // the diff hunk) rather than the absolute file line number.
   const diffLines = new Set();
+  const diffPositions = new Map();  // "file:line" -> position in patch
   for (const f of prFiles) {
     if (!f.patch) continue;
-    const hunkRegex = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/gm;
-    let match;
-    while ((match = hunkRegex.exec(f.patch)) !== null) {
-      const start = parseInt(match[1]);
-      const count = parseInt(match[2] || '1');
-      for (let i = start; i < start + count; i++) {
-        diffLines.add(`${f.filename}:${i}`);
+    const patchLines = f.patch.split('\n');
+    let currentLine = 0;
+    for (let pos = 0; pos < patchLines.length; pos++) {
+      const patchLine = patchLines[pos];
+      const hunkMatch = patchLine.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      if (hunkMatch) {
+        currentLine = parseInt(hunkMatch[1]);
+        continue;
       }
+      if (patchLine.startsWith('-')) continue;  // deleted line, skip
+      // '+' (added) or ' ' (context) lines map to the current file line
+      diffLines.add(`${f.filename}:${currentLine}`);
+      diffPositions.set(`${f.filename}:${currentLine}`, pos + 1); // 1-based
+      currentLine++;
     }
   }
 
@@ -221,16 +230,19 @@ async function main() {
     }
     const c = candidates[fix.index];
     const body = `🔧 **\`${c.err.code}\`**: ${fix.explanation || ''}\n\`\`\`suggestion\n${fix.fixed_lines ?? ''}\n\`\`\``;
+    const position = diffPositions.get(`${c.relPath}:${c.err.line}`);
+    if (!position) {
+      console.log(`  Skipped: no diff position found for ${c.relPath}:${c.err.line}`);
+      continue;
+    }
     try {
       const payload = {
         commit_id: headSha,
         path: c.relPath,
-        subject_type: 'line',
-        line: c.err.line,
-        side: 'RIGHT',
+        position: position,
         body,
       };
-      console.log(`  Posting to ${c.relPath}:${c.err.line} commit=${headSha.substring(0, 7)}`);
+      console.log(`  Posting to ${c.relPath}:${c.err.line} (position=${position}) commit=${headSha.substring(0, 7)}`);
       await ghApi(`/pulls/${prNumber}/comments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

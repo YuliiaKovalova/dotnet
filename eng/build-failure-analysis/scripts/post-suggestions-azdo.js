@@ -102,10 +102,15 @@ async function main() {
   // Collect suggestion candidates
   const candidates = [];
 
+  console.log(`Checking ${parsedErrors.length} errors against ${prFilePaths.size} PR files and ${diffLines.size} diff lines`);
+
   for (const err of parsedErrors) {
     if (!err.file || !err.line || !err.code) continue;
     const relPath = toRelPath(err.file);
-    if (!prFilePaths.has(relPath) || !diffLines.has(`${relPath}:${err.line}`)) continue;
+    const inPr = prFilePaths.has(relPath);
+    const inDiff = diffLines.has(`${relPath}:${err.line}`);
+    console.log(`  ${err.code} at ${relPath}:${err.line} — inPR=${inPr}, inDiff=${inDiff}`);
+    if (!inPr || !inDiff) continue;
     let contextLines = '';
     try {
       let filePath = err.file;
@@ -218,6 +223,7 @@ async function main() {
         body: JSON.stringify({
           commit_id: headSha,
           path: c.relPath,
+          subject_type: 'line',
           line: c.err.line,
           side: 'RIGHT',
           body,
@@ -226,7 +232,7 @@ async function main() {
       posted++;
       console.log(`Posted suggestion on ${c.relPath}:${c.err.line}`);
     } catch (e) {
-      console.log(`Could not post on ${c.relPath}:${c.err.line}: ${e.message}`);
+      console.error(`Could not post on ${c.relPath}:${c.err.line}: ${e.message}`);
     }
     if (posted >= 10) break;
   }

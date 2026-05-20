@@ -212,27 +212,34 @@ async function main() {
 
   // Post suggestions via GitHub API
   let posted = 0;
+  console.log(`Processing ${fixes.length} fixes against ${candidates.length} candidates`);
   for (const fix of fixes) {
-    if (fix.index == null || fix.index >= candidates.length) continue;
+    console.log(`  Fix: index=${fix.index}, fixed_lines=${JSON.stringify(fix.fixed_lines)?.substring(0, 80)}`);
+    if (fix.index == null || fix.index >= candidates.length) {
+      console.log(`  Skipped: index out of range (candidates=${candidates.length})`);
+      continue;
+    }
     const c = candidates[fix.index];
     const body = `🔧 **\`${c.err.code}\`**: ${fix.explanation || ''}\n\`\`\`suggestion\n${fix.fixed_lines ?? ''}\n\`\`\``;
     try {
+      const payload = {
+        commit_id: headSha,
+        path: c.relPath,
+        subject_type: 'line',
+        line: c.err.line,
+        side: 'RIGHT',
+        body,
+      };
+      console.log(`  Posting to ${c.relPath}:${c.err.line} commit=${headSha.substring(0, 7)}`);
       await ghApi(`/pulls/${prNumber}/comments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          commit_id: headSha,
-          path: c.relPath,
-          subject_type: 'line',
-          line: c.err.line,
-          side: 'RIGHT',
-          body,
-        }),
+        body: JSON.stringify(payload),
       });
       posted++;
-      console.log(`Posted suggestion on ${c.relPath}:${c.err.line}`);
+      console.log(`  ✅ Posted suggestion on ${c.relPath}:${c.err.line}`);
     } catch (e) {
-      console.error(`Could not post on ${c.relPath}:${c.err.line}: ${e.message}`);
+      console.error(`  ❌ Could not post on ${c.relPath}:${c.err.line}: ${e.message}`);
     }
     if (posted >= 10) break;
   }

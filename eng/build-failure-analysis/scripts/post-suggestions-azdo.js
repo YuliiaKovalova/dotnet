@@ -84,28 +84,36 @@ async function main() {
   const prFiles = await ghPaginate(`/pulls/${prNumber}/files`);
   const prFilePaths = new Set(prFiles.map(f => f.filename));
 
-  // Build set of lines in the PR diff
+  // Build set of lines in the PR diff (GitHub rejects suggestions on non-diff lines)
   const diffLines = new Set();
   for (const f of prFiles) {
     if (!f.patch) continue;
-    const hunkRegex = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/gm;
-    let match;
-    while ((match = hunkRegex.exec(f.patch)) !== null) {
-      const start = parseInt(match[1]);
-      const count = parseInt(match[2] || '1');
-      for (let i = start; i < start + count; i++) {
-        diffLines.add(`${f.filename}:${i}`);
+    const patchLines = f.patch.split('\n');
+    let currentLine = 0;
+    for (const patchLine of patchLines) {
+      const hunkMatch = patchLine.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      if (hunkMatch) {
+        currentLine = parseInt(hunkMatch[1]);
+        continue;
       }
+      if (patchLine.startsWith('-')) continue;
+      diffLines.add(`${f.filename}:${currentLine}`);
+      currentLine++;
     }
   }
 
   // Collect suggestion candidates
   const candidates = [];
 
+  console.log(`Checking ${parsedErrors.length} errors against ${prFilePaths.size} PR files and ${diffLines.size} diff lines`);
+
   for (const err of parsedErrors) {
     if (!err.file || !err.line || !err.code) continue;
     const relPath = toRelPath(err.file);
-    if (!prFilePaths.has(relPath) || !diffLines.has(`${relPath}:${err.line}`)) continue;
+    const inPr = prFilePaths.has(relPath);
+    const inDiff = diffLines.has(`${relPath}:${err.line}`);
+    console.log(`  ${err.code} at ${relPath}:${err.line} — inPR=${inPr}, inDiff=${inDiff}`);
+    if (!inPr || !inDiff) continue;
     let contextLines = '';
     try {
       let filePath = err.file;
@@ -163,11 +171,12 @@ async function main() {
     'You are a C# / MSBuild code fix assistant for the dotnet/dotnet VMR.',
     'For each build error below, produce the EXACT fixed line(s) to replace the erroring line.',
     'Reply ONLY with a JSON array. Each element: {"index": N, "fixed_lines": "replacement code", "explanation": "one sentence"}',
+    'IMPORTANT: "index" is the error number (0, 1, 2, ...) shown below as "Error #0", "Error #1", etc. It is NOT the line number in the file.',
     'Rules: preserve indentation, set fixed_lines to "" to delete a line, omit index if no fix, no markdown fences.',
     '',
   ];
   candidates.slice(0, 10).forEach((c, idx) => {
-    fixPrompt.push(`--- Error ${idx} ---`);
+    fixPrompt.push(`--- Error #${idx} (index=${idx}) ---`);
     fixPrompt.push(`File: ${c.relPath}, Line: ${c.err.line}`);
     fixPrompt.push(`Error: ${c.err.code}: ${c.err.message}`);
     if (c.isDeclaration) fixPrompt.push('(Declaration that caused caller errors — make backward-compatible)');
@@ -205,32 +214,42 @@ async function main() {
     }
   }
 
-  // Post suggestions via GitHub API
-  let posted = 0;
+  // Post suggestions as a single review (same API as Copilot code review).
+  // Uses POST /pulls/{pr}/reviews which supports line+side natively.
+  const reviewComments = [];
   for (const fix of fixes) {
     if (fix.index == null || fix.index >= candidates.length) continue;
     const c = candidates[fix.index];
     const body = `🔧 **\`${c.err.code}\`**: ${fix.explanation || ''}\n\`\`\`suggestion\n${fix.fixed_lines ?? ''}\n\`\`\``;
-    try {
-      await ghApi(`/pulls/${prNumber}/comments`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          commit_id: headSha,
-          path: c.relPath,
-          line: c.err.line,
-          side: 'RIGHT',
-          body,
-        }),
-      });
-      posted++;
-      console.log(`Posted suggestion on ${c.relPath}:${c.err.line}`);
-    } catch (e) {
-      console.log(`Could not post on ${c.relPath}:${c.err.line}: ${e.message}`);
-    }
-    if (posted >= 10) break;
+    reviewComments.push({
+      path: c.relPath,
+      line: c.err.line,
+      side: 'RIGHT',
+      body,
+    });
+    if (reviewComments.length >= 10) break;
   }
-  console.log(`Posted ${posted} inline suggestion(s)`);
+
+  if (reviewComments.length === 0) {
+    console.log('No valid fix suggestions to post');
+    return;
+  }
+
+  try {
+    await ghApi(`/pulls/${prNumber}/reviews`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        commit_id: headSha,
+        event: 'COMMENT',
+        body: '🔧 **Build Failure Analysis** — suggested fixes for the build errors found in this PR.',
+        comments: reviewComments,
+      }),
+    });
+    console.log(`Posted review with ${reviewComments.length} inline suggestion(s)`);
+  } catch (e) {
+    console.log(`Could not post review: ${e.message}`);
+  }
 }
 
 main().catch(e => {

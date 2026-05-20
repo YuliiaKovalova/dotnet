@@ -59,8 +59,9 @@ jobs:
         continue-on-error: true
         run: |
           set -o pipefail
+          mkdir -p /tmp/broken-project
           dotnet build eng/build-failure-analysis/simulation-test/broken.csproj \
-            --binaryLog:/tmp/broken-project/build.binlog 2>&1 | tee /tmp/build-output.log || true
+            /bl:/tmp/broken-project/build.binlog 2>&1 | tee /tmp/build-output.log || true
           echo "Build exited (expected failure)"
 
       - name: Verify build failed

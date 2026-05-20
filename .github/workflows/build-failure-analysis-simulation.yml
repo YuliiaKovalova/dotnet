@@ -39,50 +39,28 @@ jobs:
         uses: actions/checkout@v4
 
       # ── Step 1: Create a deliberately broken .NET project ──────────
+      # The project must live INSIDE the repo so errors reference files
+      # in the PR diff, enabling inline suggestions.
       - name: Create broken .NET project
         run: |
-          mkdir -p /tmp/broken-project
-          cat > /tmp/broken-project/broken.csproj << 'EOF'
+          mkdir -p eng/build-failure-analysis/simulation-test
+          cat > eng/build-failure-analysis/simulation-test/broken.csproj << 'EOF'
           <Project Sdk="Microsoft.NET.Sdk">
             <PropertyGroup>
               <OutputType>Exe</OutputType>
               <TargetFramework>net9.0</TargetFramework>
               <Nullable>enable</Nullable>
             </PropertyGroup>
-            <ItemGroup>
-              <!-- Deliberate: reference a non-existent package to simulate insertion version conflict -->
-              <PackageReference Include="Microsoft.Extensions.Logging" Version="99.0.0-fake" />
-            </ItemGroup>
           </Project>
           EOF
-
-          cat > /tmp/broken-project/Program.cs << 'CSEOF'
-          using System;
-          using Microsoft.Extensions.Logging;
-
-          // Deliberate errors to simulate a real insertion failure
-          namespace BrokenProject
-          {
-              public class Service
-              {
-                  // CS0246: type not found (simulates API break from upstream)
-                  private readonly INewApiThatDoesNotExist _api;
-
-                  // CS0117: missing member (simulates removed API)
-                  public void Run() => Console.WriteLineButBroken("hello");
-
-                  // CS1061: missing member on type
-                  public void Configure(ILogger logger) => logger.LogCriticalButRemoved("fail");
-              }
-          }
-          CSEOF
 
       - name: Build with binary log (expect failure)
         id: build
         continue-on-error: true
         run: |
           set -o pipefail
-          dotnet build /tmp/broken-project/broken.csproj --binaryLog:/tmp/broken-project/build.binlog 2>&1 | tee /tmp/build-output.log || true
+          dotnet build eng/build-failure-analysis/simulation-test/broken.csproj \
+            --binaryLog:/tmp/broken-project/build.binlog 2>&1 | tee /tmp/build-output.log || true
           echo "Build exited (expected failure)"
 
       - name: Verify build failed
@@ -207,7 +185,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: node eng/build-failure-analysis/scripts/post-pr-comment.js
 
-      # ── Step 8: Show output for debugging ──────────────────────────
+      # ── Step 8: Post inline fix suggestions ─────────────────────────
+      - name: Post inline fix suggestions
+        if: steps.extract-mcp.outputs.extracted == 'true' || steps.extract-fallback.outputs.extracted == 'true'
+        continue-on-error: true
+        env:
+          BINLOG_DATA: /tmp/binlog-analysis.json
+          GITHUB_WORKSPACE_PATH: ${{ github.workspace }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: node eng/build-failure-analysis/scripts/post-suggestions-azdo.js
+
+      # ── Step 9: Show output for debugging ──────────────────────────
       - name: Show analysis result
         if: always()
         run: |

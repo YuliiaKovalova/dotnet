@@ -84,26 +84,20 @@ async function main() {
   const prFiles = await ghPaginate(`/pulls/${prNumber}/files`);
   const prFilePaths = new Set(prFiles.map(f => f.filename));
 
-  // Build mapping from file:line to diff position (1-based offset in the patch).
-  // The GitHub review comments API requires `position` (the line index within
-  // the diff hunk) rather than the absolute file line number.
+  // Build set of lines in the PR diff (GitHub rejects suggestions on non-diff lines)
   const diffLines = new Set();
-  const diffPositions = new Map();  // "file:line" -> position in patch
   for (const f of prFiles) {
     if (!f.patch) continue;
     const patchLines = f.patch.split('\n');
     let currentLine = 0;
-    for (let pos = 0; pos < patchLines.length; pos++) {
-      const patchLine = patchLines[pos];
+    for (const patchLine of patchLines) {
       const hunkMatch = patchLine.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
       if (hunkMatch) {
         currentLine = parseInt(hunkMatch[1]);
         continue;
       }
-      if (patchLine.startsWith('-')) continue;  // deleted line, skip
-      // '+' (added) or ' ' (context) lines map to the current file line
+      if (patchLine.startsWith('-')) continue;
       diffLines.add(`${f.filename}:${currentLine}`);
-      diffPositions.set(`${f.filename}:${currentLine}`, pos + 1); // 1-based
       currentLine++;
     }
   }
@@ -220,43 +214,42 @@ async function main() {
     }
   }
 
-  // Post suggestions via GitHub API
-  let posted = 0;
-  console.log(`Processing ${fixes.length} fixes against ${candidates.length} candidates`);
+  // Post suggestions as a single review (same API as Copilot code review).
+  // Uses POST /pulls/{pr}/reviews which supports line+side natively.
+  const reviewComments = [];
   for (const fix of fixes) {
-    console.log(`  Fix: index=${fix.index}, fixed_lines=${JSON.stringify(fix.fixed_lines)?.substring(0, 80)}`);
-    if (fix.index == null || fix.index >= candidates.length) {
-      console.log(`  Skipped: index out of range (candidates=${candidates.length})`);
-      continue;
-    }
+    if (fix.index == null || fix.index >= candidates.length) continue;
     const c = candidates[fix.index];
     const body = `🔧 **\`${c.err.code}\`**: ${fix.explanation || ''}\n\`\`\`suggestion\n${fix.fixed_lines ?? ''}\n\`\`\``;
-    const position = diffPositions.get(`${c.relPath}:${c.err.line}`);
-    if (!position) {
-      console.log(`  Skipped: no diff position found for ${c.relPath}:${c.err.line}`);
-      continue;
-    }
-    try {
-      const payload = {
-        commit_id: headSha,
-        path: c.relPath,
-        position: position,
-        body,
-      };
-      console.log(`  Posting to ${c.relPath}:${c.err.line} (position=${position}) commit=${headSha.substring(0, 7)}`);
-      await ghApi(`/pulls/${prNumber}/comments`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      posted++;
-      console.log(`  ✅ Posted suggestion on ${c.relPath}:${c.err.line}`);
-    } catch (e) {
-      console.error(`  ❌ Could not post on ${c.relPath}:${c.err.line}: ${e.message}`);
-    }
-    if (posted >= 10) break;
+    reviewComments.push({
+      path: c.relPath,
+      line: c.err.line,
+      side: 'RIGHT',
+      body,
+    });
+    if (reviewComments.length >= 10) break;
   }
-  console.log(`Posted ${posted} inline suggestion(s)`);
+
+  if (reviewComments.length === 0) {
+    console.log('No valid fix suggestions to post');
+    return;
+  }
+
+  try {
+    await ghApi(`/pulls/${prNumber}/reviews`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        commit_id: headSha,
+        event: 'COMMENT',
+        body: '🔧 **Build Failure Analysis** — suggested fixes for the build errors found in this PR.',
+        comments: reviewComments,
+      }),
+    });
+    console.log(`Posted review with ${reviewComments.length} inline suggestion(s)`);
+  } catch (e) {
+    console.log(`Could not post review: ${e.message}`);
+  }
 }
 
 main().catch(e => {

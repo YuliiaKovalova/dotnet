@@ -1,6 +1,6 @@
 // Posts build failure analysis as a GitHub PR comment.
-// Adapted for Azure DevOps → GitHub flow in dotnet/dotnet.
-// Uses the GitHub REST API directly (no actions/github-script).
+// Uses update-in-place (PATCH) instead of delete+create to avoid
+// duplicate notification emails and preserve comment position.
 
 const fs = require('fs');
 
@@ -54,27 +54,6 @@ async function main() {
     analysis = fallback;
   }
 
-  // Delete any existing analysis comments to avoid spam
-  let page = 1;
-  let deleted = 0;
-  while (true) {
-    const comments = await ghApi(`/issues/${prNumber}/comments?per_page=100&page=${page}`);
-    if (!comments || comments.length === 0) break;
-
-    for (const c of comments) {
-      if (c.body && c.body.includes(marker)) {
-        await ghApi(`/issues/comments/${c.id}`, { method: 'DELETE' });
-        deleted++;
-      }
-    }
-    if (comments.length < 100) break;
-    page++;
-  }
-
-  if (deleted > 0) {
-    console.log(`Deleted ${deleted} previous analysis comment(s)`);
-  }
-
   // Build the comment body
   const sha = headSha.substring(0, 7);
   const body = [
@@ -90,14 +69,40 @@ async function main() {
     `</sub>`,
   ].join('\n');
 
-  // Post the comment
-  await ghApi(`/issues/${prNumber}/comments`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ body }),
-  });
+  // Find existing analysis comment (if any) and update in-place.
+  // This avoids duplicate notification emails and preserves timeline position.
+  let existingCommentId = null;
+  let page = 1;
+  while (!existingCommentId) {
+    const comments = await ghApi(`/issues/${prNumber}/comments?per_page=100&page=${page}`);
+    if (!comments || comments.length === 0) break;
+    for (const c of comments) {
+      if (c.body && c.body.includes(marker)) {
+        existingCommentId = c.id;
+        break;
+      }
+    }
+    if (comments.length < 100) break;
+    page++;
+  }
 
-  console.log(`Posted analysis comment on PR #${prNumber}`);
+  if (existingCommentId) {
+    // Update existing comment in-place (PATCH)
+    await ghApi(`/issues/comments/${existingCommentId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body }),
+    });
+    console.log(`Updated existing analysis comment (id: ${existingCommentId}) on PR #${prNumber}`);
+  } else {
+    // Create new comment
+    await ghApi(`/issues/${prNumber}/comments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body }),
+    });
+    console.log(`Posted new analysis comment on PR #${prNumber}`);
+  }
 }
 
 main().catch(e => {

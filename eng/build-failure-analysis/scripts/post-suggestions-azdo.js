@@ -177,11 +177,12 @@ async function main() {
     'You are a C# / MSBuild code fix assistant for the dotnet/dotnet VMR.',
     'For each build error below, produce the EXACT fixed line(s) to replace the erroring line.',
     'Reply ONLY with a JSON array. Each element: {"index": N, "fixed_lines": "replacement code", "explanation": "one sentence"}',
+    'IMPORTANT: "index" is the error number (0, 1, 2, ...) shown below as "Error #0", "Error #1", etc. It is NOT the line number in the file.',
     'Rules: preserve indentation, set fixed_lines to "" to delete a line, omit index if no fix, no markdown fences.',
     '',
   ];
   candidates.slice(0, 10).forEach((c, idx) => {
-    fixPrompt.push(`--- Error ${idx} ---`);
+    fixPrompt.push(`--- Error #${idx} (index=${idx}) ---`);
     fixPrompt.push(`File: ${c.relPath}, Line: ${c.err.line}`);
     fixPrompt.push(`Error: ${c.err.code}: ${c.err.message}`);
     if (c.isDeclaration) fixPrompt.push('(Declaration that caused caller errors — make backward-compatible)');

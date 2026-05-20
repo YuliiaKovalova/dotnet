@@ -1,0 +1,32 @@
+### Reusable step template to publish binlog files as pipeline artifacts.
+### Add this to VMR build job templates so that the Build Failure Analysis
+### stage can download and analyze them.
+###
+### Usage in a job template:
+###   steps:
+###     - <existing build steps>
+###     - template: /eng/pipelines/templates/steps/publish-binlogs.yml
+###       parameters:
+###         logDirectory: $(Build.SourcesDirectory)/artifacts/log
+###         artifactName: Build_Logs_$(buildName)
+
+parameters:
+  # Directory containing .binlog and .log files
+  - name: logDirectory
+    type: string
+    default: '$(Build.SourcesDirectory)/artifacts/log'
+
+  # Artifact name (should be unique per build leg)
+  - name: artifactName
+    type: string
+    default: 'Build_Logs_$(System.JobDisplayName)'
+
+steps:
+  - task: PublishPipelineArtifact@1
+    displayName: 'Publish build logs (binlogs)'
+    condition: always()
+    continueOnError: true
+    inputs:
+      targetPath: ${{ parameters.logDirectory }}
+      artifactName: ${{ parameters.artifactName }}
+      publishLocation: pipeline

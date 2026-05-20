@@ -114,3 +114,14 @@ stages:
             SYSTEM_PULLREQUEST_TARGETBRANCH: $(System.PullRequest.TargetBranch)
             SYSTEM_PULLREQUEST_SOURCEBRANCH: $(System.PullRequest.SourceBranch)
             SYSTEM_PULLREQUEST_PULLREQUESTNUMBER: $(System.PullRequest.PullRequestNumber)
+
+# Build Failure Analysis (insertion PRs only)
+# Automatically analyzes binlog errors when a Maestro insertion PR
+# fails and posts a diagnostic comment + inline suggestions to GitHub.
+- template: /eng/pipelines/templates/stages/build-failure-analysis.yml
+  parameters:
+    dependsOn:
+      - VMR_Vertical_Build
+      - VMR_SourceOnly_Build
+    binlogMcpVersion: '1.0.0-preview.26268.3'
+    maxBinlogs: 5

@@ -1,0 +1,127 @@
+### Build Failure Analysis stage
+### Runs after VMR build stages when triggered by a Maestro insertion PR (darc-* branch).
+### Extracts errors from MSBuild binary logs, analyzes them with AI, and posts
+### a diagnostic comment + inline suggestions back to the GitHub PR.
+###
+### Prerequisites:
+###   - Build stages must publish binlogs via PublishPipelineArtifact with artifact names
+###     containing 'Logs' (e.g., "Build_Logs_linux-x64"). See publish-binlogs.yml for a
+###     reusable step to add to build jobs.
+###   - A GitHub token (GitHubCommentToken) with issues:write and pull-requests:write scope
+###     must be configured as a secret pipeline variable.
+###   - For AI analysis, the token also needs models:read scope, or use a separate
+###     GitHubModelsToken variable.
+
+parameters:
+  # Stage(s) whose failure should trigger analysis.
+  # The condition dynamically checks if ANY of these stages failed.
+  - name: dependsOn
+    type: object
+    default:
+      - VMR_Vertical_Build
+      - VMR_SourceOnly_Build
+
+  # Pool to run the analysis job on (lightweight — no build, just log parsing)
+  - name: pool
+    type: object
+    default:
+      name: $(shortStackPoolName)
+      demands: ImageOverride -equals $(poolImage_Linux)
+      os: linux
+
+  # Version of AITools.BinlogMcp dotnet tool
+  - name: binlogMcpVersion
+    type: string
+    default: '1.0.0-preview.26268.3'
+
+  # Maximum number of binlogs to analyze (largest first)
+  - name: maxBinlogs
+    type: number
+    default: 5
+
+stages:
+  - stage: Build_Failure_Analysis
+    displayName: '🔍 Build Failure Analysis'
+    dependsOn: ${{ parameters.dependsOn }}
+    # Run only when:
+    #  1. The pipeline was triggered by a PR
+    #  2. The source branch is a Maestro insertion (darc-*) or release-pr-*
+    #  3. At least one of the depended-on stages failed
+    # Note: We use stageDependencies.<name>.result to check each stage dynamically.
+    # The ${{ each }} loop generates an or() clause for every stage in dependsOn.
+    condition: |
+      and(
+        eq(variables['Build.Reason'], 'PullRequest'),
+        or(
+          startsWith(variables['System.PullRequest.SourceBranch'], 'refs/heads/darc-'),
+          startsWith(variables['System.PullRequest.SourceBranch'], 'darc-'),
+          startsWith(variables['System.PullRequest.SourceBranch'], 'release-pr-')
+        ),
+        or(
+          ${{ each stage in parameters.dependsOn }}:
+          eq(stageDependencies.${{ stage }}.result, 'Failed'),
+        )
+      )
+    jobs:
+      - job: Analyze_Build_Failure
+        displayName: 'Analyze build failure and post PR comment'
+        timeoutInMinutes: 20
+        pool: ${{ parameters.pool }}
+        steps:
+          - checkout: self
+            fetchDepth: 1
+
+          # Download binlog artifacts published by the failed build stages.
+          # Expects artifacts published via the publish-binlogs.yml step template.
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download build log artifacts'
+            continueOnError: true
+            inputs:
+              buildType: current
+              patterns: '**/*.binlog'
+              targetPath: $(Agent.TempDirectory)/binlogs
+
+          # Resolve the GitHub PR number from the source branch.
+          # AzDO's System.PullRequest.PullRequestNumber is the AzDO PR number,
+          # which differs from the GitHub PR number.
+          - script: |
+              set -uo pipefail
+              BRANCH="$(System.PullRequest.SourceBranch)"
+              # Strip refs/heads/ prefix if present
+              BRANCH="${BRANCH#refs/heads/}"
+              echo "Resolving GitHub PR for branch: $BRANCH"
+
+              # Query GitHub for an open PR from this branch
+              PR_JSON=$(curl -sf \
+                -H "Authorization: Bearer $(GitHubCommentToken)" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/dotnet/dotnet/pulls?head=dotnet:${BRANCH}&state=open&per_page=1" \
+              ) || { echo "##[warning]Failed to query GitHub API"; exit 0; }
+
+              GH_PR_NUMBER=$(echo "$PR_JSON" | node -e "
+                const data = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+                if (data.length > 0) console.log(data[0].number);
+              ")
+              GH_HEAD_SHA=$(echo "$PR_JSON" | node -e "
+                const data = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+                if (data.length > 0) console.log(data[0].head.sha);
+              ")
+
+              if [ -z "$GH_PR_NUMBER" ]; then
+                echo "##[warning]Could not find GitHub PR for branch $BRANCH"
+                echo "##vso[task.setvariable variable=ghPrFound]false"
+                exit 0
+              fi
+
+              echo "GitHub PR #$GH_PR_NUMBER (HEAD: $GH_HEAD_SHA)"
+              echo "##vso[task.setvariable variable=ghPrNumber]$GH_PR_NUMBER"
+              echo "##vso[task.setvariable variable=ghHeadSha]$GH_HEAD_SHA"
+              echo "##vso[task.setvariable variable=ghPrFound]true"
+            displayName: 'Resolve GitHub PR number and HEAD SHA'
+
+          # Run the analysis step template
+          - template: /eng/pipelines/templates/steps/build-failure-analysis.yml
+            parameters:
+              binlogDirectory: $(Agent.TempDirectory)/binlogs
+              binlogMcpVersion: ${{ parameters.binlogMcpVersion }}
+              maxBinlogs: ${{ parameters.maxBinlogs }}

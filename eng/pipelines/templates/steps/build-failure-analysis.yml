@@ -1,0 +1,273 @@
+### Step template: Build Failure Analysis
+### Extracts errors from binlogs via binlog-mcp, runs AI analysis, and posts a PR comment.
+###
+### Expects the following pipeline variables to be set by the calling stage:
+###   ghPrNumber  — GitHub PR number (resolved from branch, NOT AzDO PR number)
+###   ghHeadSha   — GitHub PR head SHA (for accurate file links and inline suggestions)
+###   ghPrFound   — 'true' if the GitHub PR was successfully resolved
+
+parameters:
+  - name: binlogDirectory
+    type: string
+
+  - name: binlogMcpVersion
+    type: string
+
+  - name: maxBinlogs
+    type: number
+    default: 5
+
+steps:
+  # ── 1. Locate binlog files ──────────────────────────────────────────
+  - script: |
+      set -uo pipefail
+      BINLOG_DIR="${{ parameters.binlogDirectory }}"
+      echo "Searching for binlogs in: $BINLOG_DIR"
+
+      if [ ! -d "$BINLOG_DIR" ]; then
+        echo "##[warning]No binlog directory found at $BINLOG_DIR"
+        echo "##vso[task.setvariable variable=binlogsFound]false"
+        exit 0
+      fi
+
+      # Find binlogs sorted by size (largest = most complete build)
+      BINLOGS=$(find "$BINLOG_DIR" -name '*.binlog' -type f -printf '%s %p\n' 2>/dev/null \
+        | sort -rn \
+        | head -${{ parameters.maxBinlogs }} \
+        | cut -d' ' -f2-)
+
+      if [ -z "$BINLOGS" ]; then
+        echo "##[warning]No .binlog files found"
+        echo "##vso[task.setvariable variable=binlogsFound]false"
+        exit 0
+      fi
+
+      echo "Found binlogs:"
+      echo "$BINLOGS"
+
+      # Write newline-separated list for downstream steps
+      echo "$BINLOGS" > /tmp/binlog-list.txt
+      echo "##vso[task.setvariable variable=binlogsFound]true"
+    displayName: 'Find binlog files'
+    condition: eq(variables['ghPrFound'], 'true')
+
+  # ── 2. Install binlog-mcp tool ──────────────────────────────────────
+  - script: |
+      set -uo pipefail
+      mkdir -p /tmp/binlog-tool
+      cat > /tmp/binlog-tool/nuget.config << 'EOF'
+      <?xml version="1.0" encoding="utf-8"?>
+      <configuration>
+        <packageSources>
+          <clear />
+          <add key="dotnet-eng" value="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-eng/nuget/v3/index.json" />
+        </packageSources>
+      </configuration>
+      EOF
+      dotnet tool install --global AITools.BinlogMcp \
+        --configfile /tmp/binlog-tool/nuget.config \
+        --version "${{ parameters.binlogMcpVersion }}"
+      echo "##vso[task.prependpath]$HOME/.dotnet/tools"
+    displayName: 'Install binlog-mcp'
+    condition: and(eq(variables['ghPrFound'], 'true'), eq(variables['binlogsFound'], 'true'))
+
+  # ── 3. Setup Node.js and install dependencies ──────────────────────
+  - task: UseNode@1
+    displayName: 'Setup Node.js 20'
+    condition: and(eq(variables['ghPrFound'], 'true'), eq(variables['binlogsFound'], 'true'))
+    inputs:
+      version: '20.x'
+
+  - script: |
+      set -uo pipefail
+      cd "$(Build.SourcesDirectory)/eng/build-failure-analysis/scripts"
+      npm ci --ignore-scripts
+    displayName: 'Install analysis script dependencies'
+    condition: and(eq(variables['ghPrFound'], 'true'), eq(variables['binlogsFound'], 'true'))
+
+  # ── 4. Extract errors from all binlogs ──────────────────────────────
+  # Uses temp files instead of shell arguments to avoid ARG_MAX limits.
+  # Errors are deduplicated across multiple binlogs.
+  - script: |
+      set -uo pipefail
+      SCRIPT_DIR="$(Build.SourcesDirectory)/eng/build-failure-analysis/scripts"
+
+      # Initialize combined output files
+      echo "[]" > /tmp/combined-errors.json
+      printf "" > /tmp/combined-overview.txt
+
+      EXTRACT_OK=false
+
+      while IFS= read -r binlog; do
+        [ -z "$binlog" ] && continue
+        echo "Extracting errors from: $binlog"
+
+        if timeout 120 node "$SCRIPT_DIR/extract-binlog-errors.js" "$binlog" > /tmp/current-binlog.json 2>/tmp/extract-err.log; then
+          # Validate JSON
+          if node -e "JSON.parse(require('fs').readFileSync('/tmp/current-binlog.json','utf8'))" 2>/dev/null; then
+            # Merge errors using temp files (avoids ARG_MAX)
+            node "$SCRIPT_DIR/merge-errors.js" \
+              /tmp/combined-errors.json \
+              /tmp/current-binlog.json \
+              /tmp/combined-errors.json
+
+            # Append overview
+            node -e "
+              const data = JSON.parse(require('fs').readFileSync('/tmp/current-binlog.json','utf8'));
+              if (data.overview && data.overview !== 'No data') {
+                const binlog = data.binlogFile || 'unknown';
+                process.stdout.write('\n---\n### ' + binlog + '\n' + data.overview);
+              }
+            " >> /tmp/combined-overview.txt
+
+            EXTRACT_OK=true
+          else
+            echo "##[warning]Invalid JSON from binlog extraction, skipping"
+            cat /tmp/extract-err.log 2>/dev/null || true
+          fi
+        else
+          echo "##[warning]Failed to extract from $binlog (exit code $?)"
+          cat /tmp/extract-err.log 2>/dev/null || true
+        fi
+      done < /tmp/binlog-list.txt
+
+      if [ "$EXTRACT_OK" = true ]; then
+        # Write combined result from temp files
+        node -e "
+          const fs = require('fs');
+          const errors = fs.readFileSync('/tmp/combined-errors.json', 'utf8');
+          const overview = fs.readFileSync('/tmp/combined-overview.txt', 'utf8');
+          const result = { overview, errors, warnings: 'N/A' };
+          fs.writeFileSync('/tmp/binlog-analysis.json', JSON.stringify(result, null, 2));
+          const parsed = JSON.parse(errors);
+          console.log('Total unique errors extracted: ' + parsed.length);
+        "
+        echo "##vso[task.setvariable variable=errorsExtracted]true"
+        echo "##vso[task.setvariable variable=extractionMethod]binlog-mcp"
+      else
+        echo "##[warning]No binlogs were successfully extracted"
+        echo "##vso[task.setvariable variable=errorsExtracted]false"
+      fi
+    displayName: 'Extract errors from binlogs (multi-binlog)'
+    condition: and(eq(variables['ghPrFound'], 'true'), eq(variables['binlogsFound'], 'true'))
+    continueOnError: true
+
+  # ── 4b. Fallback: parse raw build logs if binlog extraction failed ──
+  - script: |
+      set -uo pipefail
+
+      # Skip if binlog extraction already succeeded
+      if [ "$(errorsExtracted)" = "true" ]; then
+        echo "Binlog extraction succeeded, skipping fallback"
+        exit 0
+      fi
+
+      echo "Binlog extraction failed, attempting build log fallback"
+
+      # Look for any .log files in the downloaded artifacts
+      ARTIFACT_DIR="${{ parameters.binlogDirectory }}"
+      LOG_FILES=$(find "$ARTIFACT_DIR" -name '*.log' -type f 2>/dev/null | head -20 || true)
+      if [ -z "$LOG_FILES" ]; then
+        echo "##[warning]No log files found for fallback parsing"
+        exit 0
+      fi
+
+      echo "Found log files for fallback parsing"
+
+      # Parse error lines from all log files
+      node -e "
+        const fs = require('fs');
+        const path = require('path');
+        const logDir = '$ARTIFACT_DIR';
+
+        function findLogs(dir) {
+          let results = [];
+          try {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              const full = path.join(dir, entry.name);
+              if (entry.isDirectory()) results.push(...findLogs(full));
+              else if (entry.name.endsWith('.log')) results.push(full);
+            }
+          } catch {}
+          return results;
+        }
+
+        const logFiles = findLogs(logDir);
+        let allLines = [];
+        for (const f of logFiles) {
+          try { allLines.push(...fs.readFileSync(f, 'utf8').split('\n')); } catch {}
+        }
+
+        const errors = allLines
+          .filter(l => /: error /i.test(l))
+          .map(l => l.trim())
+          .filter((v, i, a) => a.indexOf(v) === i)
+          .slice(0, 50)
+          .map(l => {
+            const m = l.match(/^(.+)\((\d+),(\d+)\):\s*error\s+(\w+):\s*(.+?)(?:\s*\[(.+)\])?\$/);
+            return m
+              ? { severity: 'error', code: m[4], message: m[5].trim(), file: m[1], line: +m[2], column: +m[3] }
+              : { severity: 'error', message: l };
+          });
+
+        fs.writeFileSync('/tmp/binlog-analysis.json', JSON.stringify({
+          overview: 'Build failed. Errors extracted from build log output (binlog-mcp extraction was unavailable).',
+          errors: JSON.stringify(errors),
+          warnings: 'N/A'
+        }, null, 2));
+        console.log('Fallback: extracted ' + errors.length + ' errors from log files');
+      "
+
+      echo "##vso[task.setvariable variable=errorsExtracted]true"
+      echo "##vso[task.setvariable variable=extractionMethod]log-fallback"
+    displayName: 'Extract errors from build logs (fallback)'
+    condition: and(eq(variables['ghPrFound'], 'true'), ne(variables['errorsExtracted'], 'true'))
+    continueOnError: true
+
+  # ── 5. Run AI analysis ──────────────────────────────────────────────
+  - script: |
+      set -uo pipefail
+      cd "$(Build.SourcesDirectory)/eng/build-failure-analysis/scripts"
+      node analyze-errors.js
+    displayName: 'Analyze errors with AI'
+    condition: eq(variables['errorsExtracted'], 'true')
+    continueOnError: true
+    env:
+      BINLOG_DATA: /tmp/binlog-analysis.json
+      GITHUB_WORKSPACE_PATH: $(Build.SourcesDirectory)
+      PR_HEAD_SHA: $(ghHeadSha)
+      GITHUB_SERVER_URL: https://github.com
+      GITHUB_REPOSITORY: dotnet/dotnet
+      GH_TOKEN: $(GitHubCommentToken)
+
+  # ── 6. Post PR comment via GitHub API ───────────────────────────────
+  - script: |
+      set -uo pipefail
+      SCRIPT_DIR="$(Build.SourcesDirectory)/eng/build-failure-analysis/scripts"
+      node "$SCRIPT_DIR/post-pr-comment.js"
+    displayName: 'Post analysis comment to PR'
+    condition: eq(variables['errorsExtracted'], 'true')
+    continueOnError: true
+    env:
+      ANALYSIS_FILE: /tmp/analysis-result.md
+      PR_NUMBER: $(ghPrNumber)
+      HEAD_SHA: $(ghHeadSha)
+      BUILD_URL: $(System.CollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)
+      GITHUB_REPOSITORY: dotnet/dotnet
+      GH_TOKEN: $(GitHubCommentToken)
+
+  # ── 7. Post inline suggestions ─────────────────────────────────────
+  - script: |
+      set -uo pipefail
+      SCRIPT_DIR="$(Build.SourcesDirectory)/eng/build-failure-analysis/scripts"
+      node "$SCRIPT_DIR/post-suggestions-azdo.js"
+    displayName: 'Post inline fix suggestions'
+    condition: eq(variables['errorsExtracted'], 'true')
+    continueOnError: true
+    env:
+      BINLOG_DATA: /tmp/binlog-analysis.json
+      GITHUB_WORKSPACE_PATH: $(Build.SourcesDirectory)
+      PR_NUMBER: $(ghPrNumber)
+      HEAD_SHA: $(ghHeadSha)
+      GITHUB_REPOSITORY: dotnet/dotnet
+      GH_TOKEN: $(GitHubCommentToken)

@@ -1,0 +1,15 @@
+{
+  "name": "dotnet-build-failure-analysis",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MCP client scripts for VMR build failure analysis (dotnet/dotnet)",
+  "main": "extract-binlog-errors.js",
+  "scripts": {},
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  }
+}

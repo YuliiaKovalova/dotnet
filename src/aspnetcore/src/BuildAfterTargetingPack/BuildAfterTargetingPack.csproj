@@ -48,6 +48,7 @@
         BuildInParallel="false"
         Properties="MSBuildRestoreSessionId=$([System.Guid]::NewGuid());RestoreDisableParallel=true"
         Targets="Restore" />
+    <!-- TODO: Investigate MSB3491 race condition when building IIS project in parallel (see dotnet/aspnetcore#XXXXX) -->
     <MSBuild Projects="@(RequiresDelayedBuild)" BuildInParallel="false" Targets="Build">
       <Output TaskParameter="TargetOutputs" ItemName="TargetPathWithTargetPlatformMoniker" />
     </MSBuild>

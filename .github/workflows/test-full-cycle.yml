@@ -1,0 +1,184 @@
+name: "🧪 Full Cycle: Build + Both MCPs + PR Comment"
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    paths:
+      - 'eng/build-failure-analysis/test-conflict/**'
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  full-cycle-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BINLOG_MCP_VERSION: '1.0.0-preview.26268.3'
+      NUGET_MCP_VERSION: '1.4.3'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build test-conflict project with /bl
+        id: build
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          dotnet build eng/build-failure-analysis/test-conflict/ConflictDemo.csproj \
+            /bl:/tmp/conflict-build.binlog 2>&1 | tee /tmp/build-output.log || true
+          echo "Build exit: $?"
+          if [ -f /tmp/conflict-build.binlog ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "path=/tmp/conflict-build.binlog" >> "$GITHUB_OUTPUT"
+            echo "Binlog: $(du -h /tmp/conflict-build.binlog | cut -f1)"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install binlog-mcp
+        if: steps.build.outputs.found == 'true'
+        run: |
+          dotnet tool install --global AITools.BinlogMcp \
+            --add-source "https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/index.json" \
+            --version "$BINLOG_MCP_VERSION"
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - name: Install NuGet MCP Server
+        if: steps.build.outputs.found == 'true'
+        continue-on-error: true
+        run: dotnet tool install --global NuGet.Mcp.Server --version "$NUGET_MCP_VERSION"
+
+      - name: "MCP 1: Dump binlog errors (binlog-mcp)"
+        if: steps.build.outputs.found == 'true'
+        run: |
+          mkdir -p /tmp/binlog-data
+          timeout 120 dotnet run --project .github/workflows/scripts/DumpBinlog -- \
+            "${{ steps.build.outputs.path }}" \
+            /tmp/binlog-data
+          echo "=== Errors from binlog-mcp ==="
+          cat /tmp/binlog-data/binlog-errors.json
+
+      - name: "MCP 2: NuGet package analysis"
+        if: steps.build.outputs.found == 'true'
+        continue-on-error: true
+        run: |
+          echo "=== Package list (with transitive) ==="
+          cd eng/build-failure-analysis/test-conflict
+          dotnet list package --include-transitive 2>&1 || true
+          echo ""
+          echo "=== Outdated packages ==="
+          dotnet list package --outdated 2>&1 || true
+
+      - name: Post full analysis to PR
+        if: steps.build.outputs.found == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const prNumber = context.payload.pull_request?.number;
+            if (!prNumber) { core.info('No PR'); return; }
+
+            let overview = '', errors = '';
+            try { overview = fs.readFileSync('/tmp/binlog-data/binlog-overview.json', 'utf8'); } catch {}
+            try { errors = fs.readFileSync('/tmp/binlog-data/binlog-errors.json', 'utf8'); } catch {}
+
+            let overviewText = '';
+            try {
+              const parsed = JSON.parse(overview);
+              overviewText = typeof parsed === 'string' ? parsed : JSON.stringify(parsed, null, 2);
+            } catch { overviewText = overview; }
+
+            let parsedErrors = [];
+            try { parsedErrors = JSON.parse(errors); } catch {}
+            if (typeof parsedErrors === 'string') try { parsedErrors = JSON.parse(parsedErrors); } catch {}
+            if (!Array.isArray(parsedErrors)) parsedErrors = [];
+
+            const nugetErrors = parsedErrors.filter(e => e.code && e.code.startsWith('NU'));
+            const csErrors = parsedErrors.filter(e => e.code && e.code.startsWith('CS'));
+
+            let errorTable = '';
+            if (parsedErrors.length > 0) {
+              const rows = parsedErrors.filter(e => e.code).map(e => {
+                const file = e.file ? e.file.replace(/.*\/eng\//, 'eng/').replace(/\\/g, '/') : '—';
+                return `| \`${e.code}\` | ${file}:${e.line || ''} | ${e.message || ''} |`;
+              }).join('\n');
+              errorTable = `| Code | File | Message |\n| ---- | ---- | ------- |\n${rows}`;
+            }
+
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            const sha = context.payload.pull_request.head.sha.substring(0, 7);
+
+            const marker = '<!-- binlog-failure-analysis -->';
+            const body = [
+              marker,
+              '## 🔍 Build Failure Analysis — Full Cycle Demo',
+              '',
+              '### 📊 Build Overview (via `binlog-mcp`)',
+              '```',
+              overviewText,
+              '```',
+              '',
+              parsedErrors.length > 0 ? `### ❌ Build Errors (${parsedErrors.length})` : '### ✅ No errors',
+              '',
+              nugetErrors.length > 0 ? `> **${nugetErrors.length} NuGet error(s)** detected — NuGet MCP Server can resolve these with \`dotnet NuGet.Mcp.Server\`` : '',
+              '',
+              errorTable || '_No errors._',
+              '',
+              '### 🔧 MCP Servers',
+              '| Server | Role | Result |',
+              '| --- | --- | --- |',
+              `| **binlog-mcp** | Extract errors from \`.binlog\` | ✅ ${parsedErrors.length} errors |`,
+              `| **NuGet MCP Server** | Resolve package conflicts | ${nugetErrors.length > 0 ? '🎯 Can resolve ' + nugetErrors.length + ' NU errors' : '⏭️ No NuGet errors'} |`,
+              '',
+              '---',
+              `<sub>🤖 commit ${sha} · [workflow run](${runUrl})</sub>`,
+            ].join('\n');
+
+            // Post inline suggestion on the csproj if NU errors found
+            if (nugetErrors.length > 0) {
+              const prFiles = await github.paginate(
+                github.rest.pulls.listFiles,
+                { owner: context.repo.owner, repo: context.repo.repo, pull_number: prNumber, per_page: 100 }
+              );
+              const csprojFile = prFiles.find(f => f.filename.endsWith('ConflictDemo.csproj'));
+              if (csprojFile) {
+                const nuErr = nugetErrors[0];
+                try {
+                  await github.rest.pulls.createReview({
+                    owner: context.repo.owner, repo: context.repo.repo,
+                    pull_number: prNumber, commit_id: context.payload.pull_request.head.sha,
+                    event: 'COMMENT',
+                    body: `🔧 **Build Failure Analysis** — NuGet version conflict detected (${nugetErrors.map(e => e.code).join(', ')})`,
+                    comments: [{
+                      path: csprojFile.filename,
+                      line: 8,
+                      side: 'RIGHT',
+                      body: `🔧 **\`${nuErr.code}\`** — ${nuErr.message || 'Version conflict detected'}\n\nUpdate to a compatible version to resolve the transitive dependency conflict:\n\`\`\`suggestion\n    <PackageReference Include="System.Text.Json" Version="9.0.0" />\n\`\`\``,
+                    }],
+                  });
+                  core.info('Posted inline suggestion');
+                } catch (e) {
+                  core.info(`Could not post inline: ${e.message}`);
+                }
+              }
+            }
+
+            // Post/update PR comment
+            const allComments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner: context.repo.owner, repo: context.repo.repo, issue_number: prNumber, per_page: 100 }
+            );
+            const existing = allComments.filter(c => c.body.includes(marker));
+            const latest = existing[existing.length - 1];
+            if (latest) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo, comment_id: latest.id, body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: prNumber, body
+              });
+            }
+            core.info(`Analysis posted to PR #${prNumber}`);

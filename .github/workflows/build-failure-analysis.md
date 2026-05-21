@@ -43,7 +43,6 @@ concurrency:
 
 env:
   BINLOG_MCP_VERSION: '1.0.0-preview.26268.3'
-  NUGET_MCP_VERSION: '1.4.3'
   AZDO_ORG: 'dnceng-public'
   AZDO_PROJECT: ${{ inputs.azdo-project || 'public' }}
 
@@ -72,48 +71,35 @@ steps:
 
       mkdir -p /tmp/azdo-artifacts
 
-      # List artifacts from the AzDO build
+      # List artifacts from the AzDO build (public API, no auth needed for public project)
       ARTIFACTS=$(curl -sf \
         "https://dev.azure.com/${AZDO_ORG}/${AZDO_PROJECT}/_apis/build/builds/${BUILD_ID}/artifacts?api-version=7.1" \
       ) || { echo "##[error]Failed to list AzDO artifacts"; exit 1; }
 
-      # Find the failed job via the build timeline, then download its BuildLogs
-      TIMELINE=$(curl -sf \
-        "https://dev.azure.com/${AZDO_ORG}/${AZDO_PROJECT}/_apis/build/builds/${BUILD_ID}/timeline?api-version=7.1" \
-      ) || echo "{}"
+      # Find BuildLogs artifacts that may contain binlogs
+      ARTIFACT_NAMES=$(echo "$ARTIFACTS" | jq -r '.value[].name' | grep -iE 'log|binlog|BuildLogs' || true)
 
-      FAILED_JOB=$(echo "$TIMELINE" | jq -r '[.records[] | select(.type=="Job" and .result=="failed")] | .[0].name // empty')
-      echo "Failed job: ${FAILED_JOB:-none detected}"
-
-      ARTIFACT_NAME=""
-      if [ -n "$FAILED_JOB" ]; then
-        # Find the BuildLogs artifact matching the failed job
-        ARTIFACT_NAME=$(echo "$ARTIFACTS" | jq -r --arg job "$FAILED_JOB" \
-          '[.value[] | select(.name | test("BuildLogs"; "i")) | select(.name | test($job; "i"))] | .[0].name // empty')
-      fi
-
-      # Fallback: smallest BuildLogs artifact
-      if [ -z "$ARTIFACT_NAME" ]; then
-        ARTIFACT_NAME=$(echo "$ARTIFACTS" | jq -r \
-          '[.value[] | select(.name | test("BuildLogs"; "i"))] | sort_by(.resource.properties.artifactsize) | .[0].name // empty')
-      fi
-
-      if [ -z "$ARTIFACT_NAME" ] || [ "$ARTIFACT_NAME" = "null" ]; then
-        echo "##[warning]No BuildLogs artifacts found"
+      if [ -z "$ARTIFACT_NAMES" ]; then
+        echo "##[warning]No log artifacts found in AzDO build $BUILD_ID"
         echo "found=false" >> "$GITHUB_OUTPUT"
         exit 0
       fi
 
-      echo "Downloading artifact: $ARTIFACT_NAME"
-      curl -sfL -o /tmp/azdo-artifacts/logs.zip \
-        "https://dev.azure.com/${AZDO_ORG}/${AZDO_PROJECT}/_apis/build/builds/${BUILD_ID}/artifacts?artifactName=${ARTIFACT_NAME}&api-version=7.1&%24format=zip" \
-        || { echo "##[error]Failed to download $ARTIFACT_NAME"; echo "found=false" >> "$GITHUB_OUTPUT"; exit 0; }
+      echo "Found artifacts: $ARTIFACT_NAMES"
 
-      echo "Extracting..."
-      unzip -qo /tmp/azdo-artifacts/logs.zip -d /tmp/azdo-artifacts/ 2>/dev/null || true
+      # Download each matching artifact
+      for NAME in $ARTIFACT_NAMES; do
+        echo "Downloading artifact: $NAME"
+        curl -sfL -o "/tmp/azdo-artifacts/${NAME}.zip" \
+          "https://dev.azure.com/${AZDO_ORG}/${AZDO_PROJECT}/_apis/build/builds/${BUILD_ID}/artifacts?artifactName=${NAME}&api-version=7.1&%24format=zip" \
+          || { echo "##[warning]Failed to download $NAME"; continue; }
+        unzip -qo "/tmp/azdo-artifacts/${NAME}.zip" -d /tmp/azdo-artifacts/ 2>/dev/null || true
+      done
 
-      # Pick the top-level VMR orchestration binlog (no repo subdir)
-      BINLOG=$(find /tmp/azdo-artifacts -path '*/artifacts/log/Release/Build.binlog' -not -path '*/Release/*/Build.binlog' -type f 2>/dev/null | head -1)
+      # Find binlogs in downloaded artifacts
+      # The top-level Build.binlog is the VMR orchestration log containing all errors.
+      TOP_BINLOG=$(find /tmp/azdo-artifacts -maxdepth 4 -name 'Build.binlog' -path '*/log/Release/Build.binlog' -type f 2>/dev/null | head -1)
+      BINLOG="${TOP_BINLOG}"
       if [ -z "$BINLOG" ]; then
         BINLOG=$(find /tmp/azdo-artifacts -name '*.binlog' -type f -printf '%s %p\n' 2>/dev/null \
           | sort -rn | head -1 | cut -d' ' -f2-)
@@ -124,7 +110,7 @@ steps:
         echo "found=true" >> "$GITHUB_OUTPUT"
         echo "path=$BINLOG" >> "$GITHUB_OUTPUT"
       else
-        echo "##[warning]No .binlog files found"
+        echo "##[warning]No .binlog files found in downloaded artifacts"
         echo "found=false" >> "$GITHUB_OUTPUT"
       fi
 
@@ -135,11 +121,6 @@ steps:
         --add-source "https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/index.json" \
         --version "$BINLOG_MCP_VERSION"
       echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
-
-  - name: Install NuGet MCP Server
-    if: steps.download.outputs.found == 'true'
-    continue-on-error: true
-    run: dotnet tool install --global NuGet.Mcp.Server --version "$NUGET_MCP_VERSION"
 
   - name: Dump binlog as JSON
     if: steps.download.outputs.found == 'true'
@@ -186,7 +167,6 @@ tools:
     - "find"
     - "curl"
     - "jq"
-    - "dotnet"
 
 safe-outputs:
   add-comment:

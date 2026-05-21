@@ -7,6 +7,10 @@ on:
         description: "AzDO build ID to download binlogs from"
         required: true
         type: string
+      artifact-name:
+        description: "Specific artifact name (leave empty for auto-detect failed leg)"
+        required: false
+        type: string
       pr-number:
         description: "GitHub PR number (for context only)"
         required: false
@@ -38,9 +42,27 @@ jobs:
           ARTIFACTS=$(curl -sf \
             "https://dev.azure.com/dnceng-public/public/_apis/build/builds/${BUILD_ID}/artifacts?api-version=7.1")
 
-          # Find the smallest BuildLogs artifact
-          ARTIFACT_NAME=$(echo "$ARTIFACTS" | jq -r \
-            '[.value[] | select(.name | test("BuildLogs"; "i"))] | sort_by(.resource.properties.artifactsize) | .[0].name')
+          SPECIFIC="${{ inputs.artifact-name }}"
+          if [ -n "$SPECIFIC" ]; then
+            ARTIFACT_NAME="$SPECIFIC"
+          else
+            # Find failed jobs first, then pick their BuildLogs artifact
+            TIMELINE=$(curl -sf \
+              "https://dev.azure.com/dnceng-public/public/_apis/build/builds/${BUILD_ID}/timeline?api-version=7.1")
+            FAILED_JOB=$(echo "$TIMELINE" | jq -r '[.records[] | select(.type=="Job" and .result=="failed")] | .[0].name // empty')
+
+            if [ -n "$FAILED_JOB" ]; then
+              # Try to find a BuildLogs artifact matching the failed job name
+              ARTIFACT_NAME=$(echo "$ARTIFACTS" | jq -r --arg job "$FAILED_JOB" \
+                '[.value[] | select(.name | test("BuildLogs"; "i")) | select(.name | test($job; "i"))] | .[0].name // empty')
+            fi
+
+            # Fallback: pick the smallest BuildLogs artifact
+            if [ -z "$ARTIFACT_NAME" ]; then
+              ARTIFACT_NAME=$(echo "$ARTIFACTS" | jq -r \
+                '[.value[] | select(.name | test("BuildLogs"; "i"))] | sort_by(.resource.properties.artifactsize) | .[0].name // empty')
+            fi
+          fi
 
           if [ "$ARTIFACT_NAME" = "null" ] || [ -z "$ARTIFACT_NAME" ]; then
             echo "No BuildLogs artifacts found"

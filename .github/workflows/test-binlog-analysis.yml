@@ -1,0 +1,96 @@
+name: "🧪 Test Binlog Analysis (Download from AzDO)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      azdo-build-id:
+        description: "AzDO build ID to download binlogs from"
+        required: true
+        type: string
+      pr-number:
+        description: "GitHub PR number (for context only)"
+        required: false
+        type: string
+        default: "6720"
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  test-analysis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BINLOG_MCP_VERSION: '1.0.0-preview.26268.3'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download binlogs from Azure DevOps
+        id: download
+        run: |
+          set -uo pipefail
+          BUILD_ID="${{ inputs.azdo-build-id }}"
+          echo "Downloading from AzDO build $BUILD_ID"
+          mkdir -p /tmp/azdo-artifacts
+
+          ARTIFACTS=$(curl -sf \
+            "https://dev.azure.com/dnceng-public/public/_apis/build/builds/${BUILD_ID}/artifacts?api-version=7.1")
+
+          # Find the smallest BuildLogs artifact
+          ARTIFACT_NAME=$(echo "$ARTIFACTS" | jq -r \
+            '[.value[] | select(.name | test("BuildLogs"; "i"))] | sort_by(.resource.properties.artifactsize) | .[0].name')
+
+          if [ "$ARTIFACT_NAME" = "null" ] || [ -z "$ARTIFACT_NAME" ]; then
+            echo "No BuildLogs artifacts found"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Downloading: $ARTIFACT_NAME"
+          curl -sfL -o /tmp/azdo-artifacts/logs.zip \
+            "https://dev.azure.com/dnceng-public/public/_apis/build/builds/${BUILD_ID}/artifacts?artifactName=${ARTIFACT_NAME}&api-version=7.1&%24format=zip"
+
+          echo "Extracting..."
+          unzip -qo /tmp/azdo-artifacts/logs.zip -d /tmp/azdo-artifacts/ 2>/dev/null || true
+
+          BINLOG=$(find /tmp/azdo-artifacts -name '*.binlog' -type f -printf '%s %p\n' 2>/dev/null \
+            | sort -rn | head -1 | cut -d' ' -f2-)
+
+          if [ -n "$BINLOG" ] && [ -f "$BINLOG" ]; then
+            echo "Found binlog: $BINLOG ($(du -h "$BINLOG" | cut -f1))"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "path=$BINLOG" >> "$GITHUB_OUTPUT"
+          else
+            echo "No .binlog files found"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install binlog-mcp
+        if: steps.download.outputs.found == 'true'
+        run: |
+          dotnet tool install --global AITools.BinlogMcp \
+            --add-source "https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/index.json" \
+            --version "$BINLOG_MCP_VERSION"
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - name: Dump binlog as JSON (C#)
+        if: steps.download.outputs.found == 'true'
+        run: |
+          mkdir -p /tmp/binlog-data
+          timeout 120 dotnet run --project .github/workflows/scripts/DumpBinlog -- \
+            "${{ steps.download.outputs.path }}" \
+            /tmp/binlog-data
+
+      - name: Show results
+        if: always()
+        run: |
+          echo "=== Overview ==="
+          cat /tmp/binlog-data/binlog-overview.json 2>/dev/null | head -30 || echo "No overview"
+          echo ""
+          echo "=== Errors ==="
+          cat /tmp/binlog-data/binlog-errors.json 2>/dev/null | head -50 || echo "No errors"
+          echo ""
+          echo "=== Warnings ==="
+          cat /tmp/binlog-data/binlog-warnings.json 2>/dev/null | head -20 || echo "No warnings"

@@ -22,8 +22,12 @@ on:
         required: true
         type: string
       azdo-build-id:
-        description: "Azure DevOps build ID to download binlogs from"
-        required: true
+        description: "Azure DevOps build ID to download binlogs from (leave empty for local build)"
+        required: false
+        type: string
+      build-project:
+        description: "Path to a project to build locally instead of downloading from AzDO"
+        required: false
         type: string
       azdo-project:
         description: "Azure DevOps project (public or internal)"
@@ -56,11 +60,34 @@ network:
 imports:
   - shared/build-failure-analysis-shared.md
 
-# Deterministic setup: download binlogs from AzDO, dump them as JSON,
-# then hand off to the agent.
+# Deterministic setup: either build a local project or download binlogs
+# from AzDO, dump them as JSON, then hand off to the agent.
 steps:
+  - name: Build local project (if specified)
+    id: local-build
+    if: inputs.build-project != ''
+    continue-on-error: true
+    env:
+      BUILD_PROJECT: ${{ inputs.build-project }}
+    run: |
+      set -uo pipefail
+      echo "Building local project: $BUILD_PROJECT"
+      mkdir -p /tmp/azdo-artifacts/local/artifacts/log/Release
+      dotnet build "$BUILD_PROJECT" \
+        /bl:/tmp/azdo-artifacts/local/artifacts/log/Release/Build.binlog \
+        2>&1 | tee /tmp/build-output.log || true
+      BINLOG="/tmp/azdo-artifacts/local/artifacts/log/Release/Build.binlog"
+      if [ -f "$BINLOG" ]; then
+        echo "Binlog: $(du -h "$BINLOG" | cut -f1)"
+        echo "found=true" >> "$GITHUB_OUTPUT"
+        echo "path=$BINLOG" >> "$GITHUB_OUTPUT"
+      else
+        echo "found=false" >> "$GITHUB_OUTPUT"
+      fi
+
   - name: Download binlogs from Azure DevOps
     id: download
+    if: inputs.build-project == '' && inputs.azdo-build-id != ''
     run: |
       set -uo pipefail
       BUILD_ID="${{ inputs.azdo-build-id }}"
@@ -115,21 +142,26 @@ steps:
       fi
 
   - name: Install binlog-mcp
-    if: steps.download.outputs.found == 'true'
+    if: steps.download.outputs.found == 'true' || steps.local-build.outputs.found == 'true'
     run: |
       dotnet tool install --global AITools.BinlogMcp \
         --add-source "https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/index.json" \
         --version "$BINLOG_MCP_VERSION"
       echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
 
+  - name: Install NuGet MCP Server
+    if: steps.download.outputs.found == 'true' || steps.local-build.outputs.found == 'true'
+    continue-on-error: true
+    run: dotnet tool install --global NuGet.Mcp.Server --version "$NUGET_MCP_VERSION"
+
   - name: Dump binlog as JSON
-    if: steps.download.outputs.found == 'true'
+    if: steps.download.outputs.found == 'true' || steps.local-build.outputs.found == 'true'
     continue-on-error: true
     run: |
       mkdir -p /tmp/binlog-data
+      BINLOG="${{ steps.local-build.outputs.path || steps.download.outputs.path }}"
       timeout 120 dotnet run --project .github/workflows/scripts/DumpBinlog -- \
-        "${{ steps.download.outputs.path }}" \
-        /tmp/binlog-data
+        "$BINLOG" /tmp/binlog-data
 
   - name: Resolve PR head SHA
     id: resolve-pr
@@ -144,8 +176,8 @@ steps:
   - name: Export agent context
     run: |
       {
-        echo "GH_AW_BUILD_OUTCOME=${{ steps.download.outputs.found == 'true' && 'failure' || 'skipped' }}"
-        echo "GH_AW_BINLOG_PATH=${{ steps.download.outputs.path }}"
+        echo "GH_AW_BUILD_OUTCOME=${{ (steps.local-build.outputs.found == 'true' || steps.download.outputs.found == 'true') && 'failure' || 'skipped' }}"
+        echo "GH_AW_BINLOG_PATH=${{ steps.local-build.outputs.path || steps.download.outputs.path }}"
         echo "GH_AW_PR_NUMBER=${{ inputs.pr-number }}"
         echo "GH_AW_PR_HEAD_SHA=${{ steps.resolve-pr.outputs.sha || github.sha }}"
         echo "GH_AW_WORKSPACE=${{ github.workspace }}"
@@ -167,6 +199,7 @@ tools:
     - "find"
     - "curl"
     - "jq"
+    - "dotnet"
 
 safe-outputs:
   add-comment:

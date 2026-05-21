@@ -77,6 +77,7 @@ jobs:
           echo "Extracting..."
           unzip -qo /tmp/azdo-artifacts/logs.zip -d /tmp/azdo-artifacts/ 2>/dev/null || true
 
+<<<<<<< HEAD
           # The top-level Build.binlog is the VMR orchestration log that contains
           # all errors across repos. Pick it first; fall back to largest.
           TOP_BINLOG=$(find /tmp/azdo-artifacts -maxdepth 4 -name 'Build.binlog' -path '*/log/Release/Build.binlog' -type f 2>/dev/null | head -1)
@@ -85,6 +86,21 @@ jobs:
             BINLOG=$(find /tmp/azdo-artifacts -name '*.binlog' -type f -printf '%s %p\n' 2>/dev/null \
               | sort -rn | head -1 | cut -d' ' -f2-)
           fi
+=======
+          # List all binlogs for debugging
+          echo "All binlogs found:"
+          find /tmp/azdo-artifacts -name '*.binlog' -type f 2>/dev/null | while read f; do echo "  $(du -h "$f" | cut -f1) $f"; done
+
+          # The top-level Build.binlog (no repo subdir) is the VMR orchestration log
+          TOP_BINLOG=$(find /tmp/azdo-artifacts -path '*/artifacts/log/Release/Build.binlog' -not -path '*/Release/*/Build.binlog' -type f 2>/dev/null | head -1)
+          BINLOG="${TOP_BINLOG}"
+          if [ -z "$BINLOG" ]; then
+            # Fallback: largest binlog
+            BINLOG=$(find /tmp/azdo-artifacts -name '*.binlog' -type f -printf '%s %p\n' 2>/dev/null \
+              | sort -rn | head -1 | cut -d' ' -f2-)
+          fi
+          echo "Selected: $BINLOG"
+>>>>>>> 04de4d027 (Fix: select top-level VMR binlog, not per-repo runtime binlog)
 
           if [ -n "$BINLOG" ] && [ -f "$BINLOG" ]; then
             echo "Found binlog: $BINLOG ($(du -h "$BINLOG" | cut -f1))"

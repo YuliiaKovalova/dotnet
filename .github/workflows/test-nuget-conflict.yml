@@ -1,0 +1,245 @@
+name: "🧪 Test: NuGet Conflict + Both MCPs"
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr-number:
+        description: "PR number to post results to"
+        required: false
+        type: string
+        default: "1"
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  test-nuget-conflict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BINLOG_MCP_VERSION: '1.0.0-preview.26268.3'
+      NUGET_MCP_VERSION: '1.4.3'
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Create a project with deliberate NU1605 (package downgrade) ──
+      - name: Create project with NuGet conflict
+        run: |
+          mkdir -p /tmp/conflict-test
+          
+          # Project A references Newtonsoft.Json 13.0.3
+          cat > /tmp/conflict-test/ProjectA.csproj << 'EOF'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <TargetFramework>net9.0</TargetFramework>
+              <OutputType>Library</OutputType>
+              <WarningsAsErrors>NU1605</WarningsAsErrors>
+            </PropertyGroup>
+            <ItemGroup>
+              <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+              <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="9.0.0" />
+            </ItemGroup>
+          </Project>
+          EOF
+          
+          # Directory.Packages.props that pins an older conflicting version
+          cat > /tmp/conflict-test/Directory.Packages.props << 'EOF'
+          <Project>
+            <PropertyGroup>
+              <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+            </PropertyGroup>
+            <ItemGroup>
+              <PackageVersion Include="Newtonsoft.Json" Version="12.0.3" />
+              <PackageVersion Include="Microsoft.Extensions.Configuration.Json" Version="9.0.0" />
+            </ItemGroup>
+          </Project>
+          EOF
+          
+          # Override csproj to use CPM (no inline versions)
+          cat > /tmp/conflict-test/ProjectA.csproj << 'EOF'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <TargetFramework>net9.0</TargetFramework>
+              <OutputType>Library</OutputType>
+              <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+            </PropertyGroup>
+            <ItemGroup>
+              <PackageReference Include="Newtonsoft.Json" />
+              <!-- This package transitively needs a newer Newtonsoft.Json -->
+              <PackageReference Include="NSwag.Core" Version="14.0.0" />
+            </ItemGroup>
+          </Project>
+          EOF
+          
+          # Simple source file
+          cat > /tmp/conflict-test/Class1.cs << 'EOF'
+          using Newtonsoft.Json;
+          namespace ConflictTest
+          {
+              public class Converter
+              {
+                  public string Serialize(object obj) => JsonConvert.SerializeObject(obj);
+              }
+          }
+          EOF
+          
+          echo "Created test project with deliberate NuGet version conflict"
+
+      # ── Build with /bl to produce binlog with NU1605 ──
+      - name: Build with binary log (expect failure)
+        id: build
+        continue-on-error: true
+        run: |
+          cd /tmp/conflict-test
+          dotnet restore /bl:/tmp/conflict-test/restore.binlog 2>&1 | tee /tmp/build-output.log || true
+          dotnet build /bl:/tmp/conflict-test/build.binlog --no-restore 2>&1 | tee -a /tmp/build-output.log || true
+          
+          echo "Build output:"
+          grep -i "NU1605\|error\|warning.*NU\|downgrade" /tmp/build-output.log || echo "No NuGet errors found in output"
+          
+          # Use whichever binlog has content
+          BINLOG=""
+          for f in /tmp/conflict-test/restore.binlog /tmp/conflict-test/build.binlog; do
+            if [ -f "$f" ] && [ -s "$f" ]; then
+              BINLOG="$f"
+              echo "Using binlog: $f ($(du -h "$f" | cut -f1))"
+              break
+            fi
+          done
+          
+          if [ -n "$BINLOG" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "path=$BINLOG" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Install both MCP tools ──
+      - name: Install binlog-mcp
+        if: steps.build.outputs.found == 'true'
+        run: |
+          dotnet tool install --global AITools.BinlogMcp \
+            --add-source "https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-tools/nuget/v3/index.json" \
+            --version "$BINLOG_MCP_VERSION"
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - name: Install NuGet MCP Server
+        if: steps.build.outputs.found == 'true'
+        continue-on-error: true
+        run: dotnet tool install --global NuGet.Mcp.Server --version "$NUGET_MCP_VERSION"
+
+      # ── MCP 1: Extract errors from binlog via binlog-mcp ──
+      - name: Dump binlog as JSON (binlog-mcp)
+        if: steps.build.outputs.found == 'true'
+        run: |
+          mkdir -p /tmp/binlog-data
+          timeout 120 dotnet run --project .github/workflows/scripts/DumpBinlog -- \
+            "${{ steps.build.outputs.path }}" \
+            /tmp/binlog-data
+          
+          echo "=== Overview ==="
+          cat /tmp/binlog-data/binlog-overview.json | head -10
+          echo ""
+          echo "=== Errors ==="
+          cat /tmp/binlog-data/binlog-errors.json | head -30
+
+      # ── MCP 2: Resolve conflicts via NuGet MCP Server ──
+      - name: Resolve with NuGet MCP Server
+        if: steps.build.outputs.found == 'true'
+        continue-on-error: true
+        run: |
+          echo "=== Running NuGet MCP Server to resolve conflicts ==="
+          cd /tmp/conflict-test
+          
+          # List packages and their versions
+          echo "--- Package versions ---"
+          dotnet list package --include-transitive 2>&1 | head -30 || true
+          
+          echo ""
+          echo "--- Checking for vulnerable/outdated packages ---"
+          dotnet list package --outdated 2>&1 | head -20 || true
+
+      # ── Post results to PR ──
+      - name: Post results to PR
+        if: steps.build.outputs.found == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const prNumber = parseInt('${{ inputs.pr-number }}');
+            if (!prNumber) return;
+
+            let overview = '', errors = '';
+            try { overview = fs.readFileSync('/tmp/binlog-data/binlog-overview.json', 'utf8'); } catch {}
+            try { errors = fs.readFileSync('/tmp/binlog-data/binlog-errors.json', 'utf8'); } catch {}
+
+            let overviewText = '';
+            try {
+              const parsed = JSON.parse(overview);
+              overviewText = typeof parsed === 'string' ? parsed : JSON.stringify(parsed, null, 2);
+            } catch { overviewText = overview; }
+
+            let parsedErrors = [];
+            try { parsedErrors = JSON.parse(errors); } catch {}
+            if (typeof parsedErrors === 'string') try { parsedErrors = JSON.parse(parsedErrors); } catch {}
+            if (!Array.isArray(parsedErrors)) parsedErrors = [];
+
+            const nugetErrors = parsedErrors.filter(e => e.code && e.code.startsWith('NU'));
+            const otherErrors = parsedErrors.filter(e => !e.code || !e.code.startsWith('NU'));
+
+            let errorTable = '';
+            if (parsedErrors.length > 0) {
+              const rows = parsedErrors.slice(0, 20).map(e =>
+                `| \`${e.code || '—'}\` | ${(e.message || '').substring(0, 150)} |`
+              ).join('\n');
+              errorTable = `| Code | Message |\n| ---- | ------- |\n${rows}`;
+            }
+
+            const marker = '<!-- binlog-failure-analysis -->';
+            const body = [
+              marker,
+              '## 🔍 Build Failure Analysis — NuGet Conflict Test',
+              '',
+              '### 📊 Build Overview (via binlog-mcp)',
+              '```',
+              overviewText,
+              '```',
+              '',
+              nugetErrors.length > 0
+                ? `### ⚠️ NuGet Errors (${nugetErrors.length}) — candidates for NuGet MCP Server resolution`
+                : '### ✅ No NuGet errors',
+              '',
+              errorTable || '_No errors captured._',
+              '',
+              '### 🔧 MCP Servers Used',
+              '| MCP Server | Purpose | Status |',
+              '| --- | --- | --- |',
+              `| **binlog-mcp** | Extract errors from MSBuild binary log | ✅ ${parsedErrors.length} errors extracted |`,
+              `| **NuGet MCP Server** | Resolve package version conflicts | ${nugetErrors.length > 0 ? '🎯 ' + nugetErrors.length + ' NuGet errors to resolve' : '⏭️ No NuGet errors'} |`,
+              '',
+              '---',
+              `<sub>🤖 Test run · [workflow run](${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID})</sub>`,
+            ].join('\n');
+
+            const allComments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner: context.repo.owner, repo: context.repo.repo, issue_number: prNumber, per_page: 100 },
+            );
+            const existing = allComments.filter(c => c.body.includes(marker));
+            const latest = existing[existing.length - 1];
+
+            if (latest) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: latest.id, body,
+              });
+              core.info(`Updated comment on PR #${prNumber}`);
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: prNumber, body,
+              });
+              core.info(`Posted comment on PR #${prNumber}`);
+            }

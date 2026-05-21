@@ -77,8 +77,14 @@ jobs:
           echo "Extracting..."
           unzip -qo /tmp/azdo-artifacts/logs.zip -d /tmp/azdo-artifacts/ 2>/dev/null || true
 
-          BINLOG=$(find /tmp/azdo-artifacts -name '*.binlog' -type f -printf '%s %p\n' 2>/dev/null \
-            | sort -rn | head -1 | cut -d' ' -f2-)
+          # The top-level Build.binlog is the VMR orchestration log that contains
+          # all errors across repos. Pick it first; fall back to largest.
+          TOP_BINLOG=$(find /tmp/azdo-artifacts -maxdepth 4 -name 'Build.binlog' -path '*/log/Release/Build.binlog' -type f 2>/dev/null | head -1)
+          BINLOG="${TOP_BINLOG}"
+          if [ -z "$BINLOG" ]; then
+            BINLOG=$(find /tmp/azdo-artifacts -name '*.binlog' -type f -printf '%s %p\n' 2>/dev/null \
+              | sort -rn | head -1 | cut -d' ' -f2-)
+          fi
 
           if [ -n "$BINLOG" ] && [ -f "$BINLOG" ]; then
             echo "Found binlog: $BINLOG ($(du -h "$BINLOG" | cut -f1))"

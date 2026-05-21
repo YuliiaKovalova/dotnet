@@ -4,9 +4,9 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
-    <!-- System.Text.Json 8.0.0 is too old — Microsoft.Extensions.DependencyInjection 9.0.0
-         transitively needs System.Text.Json >= 9.0.0, causing NU1605 downgrade warning -->
+    <!-- Insertion: bump DI to 10.0.0-preview but keep System.Text.Json at 8.0.0
+         This causes NU1605: DI 10.0.0-preview needs System.Text.Json >= 9.0.0 -->
     <PackageReference Include="System.Text.Json" Version="8.0.0" />
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="9.0.0" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.0-preview.4.25258.110" />
   </ItemGroup>
 </Project>

@@ -1,4 +1,4 @@
-# gh-aw-metadata: {"schema_version":"v3","frontmatter_hash":"7952cfcb7b91c61ff884cc581fda0e5e25f8744eb0e0580ded6c29e8c6fd5792","compiler_version":"v0.74.8","strict":true,"agent_id":"copilot"}
+# gh-aw-metadata: {"schema_version":"v3","frontmatter_hash":"a2b7683181144e6389648dbffb5219579bda0a549681c9f1ebf88686466bf92d","compiler_version":"v0.74.8","strict":true,"agent_id":"copilot"}
 # gh-aw-manifest: {"version":1,"secrets":["COPILOT_GITHUB_TOKEN","GH_AW_GITHUB_MCP_SERVER_TOKEN","GH_AW_GITHUB_TOKEN","GITHUB_TOKEN"],"actions":[{"repo":"actions/checkout","sha":"de0fac2e4500dabe0009e67214ff5f5447ce83dd","version":"v6.0.2"},{"repo":"actions/download-artifact","sha":"3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c","version":"v8.0.1"},{"repo":"actions/github-script","sha":"3a2844b7e9c422d3c10d287c895573f7108da1b3","version":"v9.0.0"},{"repo":"actions/setup-dotnet","sha":"c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7","version":"v5.2.0"},{"repo":"actions/setup-node","sha":"48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e","version":"v6.4.0"},{"repo":"actions/upload-artifact","sha":"043fb46d1a93c77aae656e7c1c64a875d1fc6a0a","version":"v7.0.1"},{"repo":"github/gh-aw-actions/setup","sha":"efa55847f72aadb03490d955263ff911bf758700","version":"v0.74.8"}],"containers":[{"image":"ghcr.io/github/gh-aw-firewall/agent:0.25.49"},{"image":"ghcr.io/github/gh-aw-firewall/api-proxy:0.25.49"},{"image":"ghcr.io/github/gh-aw-firewall/squid:0.25.49"},{"image":"ghcr.io/github/gh-aw-mcpg:v0.3.9","digest":"sha256:64828b42a4482f58fab16509d7f8f495a6d97c972a98a68aff20543531ac0388","pinned_image":"ghcr.io/github/gh-aw-mcpg:v0.3.9@sha256:64828b42a4482f58fab16509d7f8f495a6d97c972a98a68aff20543531ac0388"},{"image":"ghcr.io/github/github-mcp-server:v1.0.4"},{"image":"node:lts-alpine","digest":"sha256:d1b3b4da11eefd5941e7f0b9cf17783fc99d9c6fc34884a665f40a06dbdfc94f","pinned_image":"node:lts-alpine@sha256:d1b3b4da11eefd5941e7f0b9cf17783fc99d9c6fc34884a665f40a06dbdfc94f"}]}
 #    ___                   _   _      
 #   / _ \                 | | (_)     
@@ -229,20 +229,20 @@ jobs:
         run: |
           bash "${RUNNER_TEMP}/gh-aw/actions/create_prompt_first.sh"
           {
-          cat << 'GH_AW_PROMPT_bcab20029c435ace_EOF'
+          cat << 'GH_AW_PROMPT_a59e9b9c4c16e31f_EOF'
           <system>
-          GH_AW_PROMPT_bcab20029c435ace_EOF
+          GH_AW_PROMPT_a59e9b9c4c16e31f_EOF
           cat "${RUNNER_TEMP}/gh-aw/prompts/xpia.md"
           cat "${RUNNER_TEMP}/gh-aw/prompts/temp_folder_prompt.md"
           cat "${RUNNER_TEMP}/gh-aw/prompts/markdown.md"
           cat "${RUNNER_TEMP}/gh-aw/prompts/safe_outputs_prompt.md"
-          cat << 'GH_AW_PROMPT_bcab20029c435ace_EOF'
+          cat << 'GH_AW_PROMPT_a59e9b9c4c16e31f_EOF'
           <safe-output-tools>
           Tools: add_comment, create_pull_request_review_comment(max:10), missing_tool, missing_data, noop
           </safe-output-tools>
-          GH_AW_PROMPT_bcab20029c435ace_EOF
+          GH_AW_PROMPT_a59e9b9c4c16e31f_EOF
           cat "${RUNNER_TEMP}/gh-aw/prompts/mcp_cli_tools_prompt.md"
-          cat << 'GH_AW_PROMPT_bcab20029c435ace_EOF'
+          cat << 'GH_AW_PROMPT_a59e9b9c4c16e31f_EOF'
           <github-context>
           The following GitHub context information is available for this workflow:
           {{#if github.actor}}
@@ -271,13 +271,13 @@ jobs:
           {{/if}}
           </github-context>
           
-          GH_AW_PROMPT_bcab20029c435ace_EOF
+          GH_AW_PROMPT_a59e9b9c4c16e31f_EOF
           cat "${RUNNER_TEMP}/gh-aw/prompts/github_mcp_tools_with_safeoutputs_prompt.md"
-          cat << 'GH_AW_PROMPT_bcab20029c435ace_EOF'
+          cat << 'GH_AW_PROMPT_a59e9b9c4c16e31f_EOF'
           </system>
           {{#runtime-import .github/workflows/shared/build-failure-analysis-shared.md}}
           {{#runtime-import .github/workflows/build-failure-analysis.md}}
-          GH_AW_PROMPT_bcab20029c435ace_EOF
+          GH_AW_PROMPT_a59e9b9c4c16e31f_EOF
           } > "$GH_AW_PROMPT"
       - name: Interpolate variables and render templates
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
@@ -432,35 +432,49 @@ jobs:
 
           mkdir -p /tmp/azdo-artifacts
 
-          # List artifacts from the AzDO build (public API, no auth needed for public project)
+          # List artifacts from the AzDO build
           ARTIFACTS=$(curl -sf \
             "https://dev.azure.com/${AZDO_ORG}/${AZDO_PROJECT}/_apis/build/builds/${BUILD_ID}/artifacts?api-version=7.1" \
           ) || { echo "##[error]Failed to list AzDO artifacts"; exit 1; }
 
-          # Find BuildLogs artifacts that may contain binlogs
-          ARTIFACT_NAMES=$(echo "$ARTIFACTS" | jq -r '.value[].name' | grep -iE 'log|binlog|BuildLogs' || true)
+          # Find the failed job via the build timeline, then download its BuildLogs
+          TIMELINE=$(curl -sf \
+            "https://dev.azure.com/${AZDO_ORG}/${AZDO_PROJECT}/_apis/build/builds/${BUILD_ID}/timeline?api-version=7.1" \
+          ) || echo "{}"
 
-          if [ -z "$ARTIFACT_NAMES" ]; then
-            echo "##[warning]No log artifacts found in AzDO build $BUILD_ID"
+          FAILED_JOB=$(echo "$TIMELINE" | jq -r '[.records[] | select(.type=="Job" and .result=="failed")] | .[0].name // empty')
+          echo "Failed job: ${FAILED_JOB:-none detected}"
+
+          ARTIFACT_NAME=""
+          if [ -n "$FAILED_JOB" ]; then
+            # Find the BuildLogs artifact matching the failed job
+            ARTIFACT_NAME=$(echo "$ARTIFACTS" | jq -r --arg job "$FAILED_JOB" \
+              '[.value[] | select(.name | test("BuildLogs"; "i")) | select(.name | test($job; "i"))] | .[0].name // empty')
+          fi
+
+          # Fallback: smallest BuildLogs artifact
+          if [ -z "$ARTIFACT_NAME" ]; then
+            ARTIFACT_NAME=$(echo "$ARTIFACTS" | jq -r \
+              '[.value[] | select(.name | test("BuildLogs"; "i"))] | sort_by(.resource.properties.artifactsize) | .[0].name // empty')
+          fi
+
+          if [ -z "$ARTIFACT_NAME" ] || [ "$ARTIFACT_NAME" = "null" ]; then
+            echo "##[warning]No BuildLogs artifacts found"
             echo "found=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          echo "Found artifacts: $ARTIFACT_NAMES"
+          echo "Downloading artifact: $ARTIFACT_NAME"
+          curl -sfL -o /tmp/azdo-artifacts/logs.zip \
+            "https://dev.azure.com/${AZDO_ORG}/${AZDO_PROJECT}/_apis/build/builds/${BUILD_ID}/artifacts?artifactName=${ARTIFACT_NAME}&api-version=7.1&%24format=zip" \
+            || { echo "##[error]Failed to download $ARTIFACT_NAME"; echo "found=false" >> "$GITHUB_OUTPUT"; exit 0; }
 
-          # Download each matching artifact
-          for NAME in $ARTIFACT_NAMES; do
-            echo "Downloading artifact: $NAME"
-            curl -sfL -o "/tmp/azdo-artifacts/${NAME}.zip" \
-              "https://dev.azure.com/${AZDO_ORG}/${AZDO_PROJECT}/_apis/build/builds/${BUILD_ID}/artifacts?artifactName=${NAME}&api-version=7.1&%24format=zip" \
-              || { echo "##[warning]Failed to download $NAME"; continue; }
-            unzip -qo "/tmp/azdo-artifacts/${NAME}.zip" -d /tmp/azdo-artifacts/ 2>/dev/null || true
-          done
+          echo "Extracting..."
+          unzip -qo /tmp/azdo-artifacts/logs.zip -d /tmp/azdo-artifacts/ 2>/dev/null || true
 
-          # Pick the top-level VMR orchestration binlog (no repo subdir between Release/ and Build.binlog)
+          # Pick the top-level VMR orchestration binlog (no repo subdir)
           BINLOG=$(find /tmp/azdo-artifacts -path '*/artifacts/log/Release/Build.binlog' -not -path '*/Release/*/Build.binlog' -type f 2>/dev/null | head -1)
           if [ -z "$BINLOG" ]; then
-            # Fallback: largest binlog
             BINLOG=$(find /tmp/azdo-artifacts -name '*.binlog' -type f -printf '%s %p\n' 2>/dev/null \
               | sort -rn | head -1 | cut -d' ' -f2-)
           fi
@@ -470,7 +484,7 @@ jobs:
             echo "found=true" >> "$GITHUB_OUTPUT"
             echo "path=$BINLOG" >> "$GITHUB_OUTPUT"
           else
-            echo "##[warning]No .binlog files found in downloaded artifacts"
+            echo "##[warning]No .binlog files found"
             echo "found=false" >> "$GITHUB_OUTPUT"
           fi
       - if: steps.download.outputs.found == 'true'
@@ -587,9 +601,9 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/gh-aw/safeoutputs"
           mkdir -p /tmp/gh-aw/safeoutputs
           mkdir -p /tmp/gh-aw/mcp-logs/safeoutputs
-          cat > "${RUNNER_TEMP}/gh-aw/safeoutputs/config.json" << 'GH_AW_SAFE_OUTPUTS_CONFIG_3a702b15075f9b13_EOF'
+          cat > "${RUNNER_TEMP}/gh-aw/safeoutputs/config.json" << 'GH_AW_SAFE_OUTPUTS_CONFIG_e670eb39e5c1326d_EOF'
           {"add_comment":{"hide_older_comments":true,"max":1},"create_pull_request_review_comment":{"max":10,"side":"RIGHT"},"create_report_incomplete_issue":{},"missing_data":{},"missing_tool":{},"noop":{"max":1,"report-as-issue":"false"},"report_incomplete":{}}
-          GH_AW_SAFE_OUTPUTS_CONFIG_3a702b15075f9b13_EOF
+          GH_AW_SAFE_OUTPUTS_CONFIG_e670eb39e5c1326d_EOF
       - name: Generate Safe Outputs Tools
         env:
           GH_AW_TOOLS_META_JSON: |
@@ -821,7 +835,7 @@ jobs:
           
           mkdir -p /home/runner/.copilot
           GH_AW_NODE=$(which node 2>/dev/null || command -v node 2>/dev/null || echo node)
-          cat << GH_AW_MCP_CONFIG_e20827bda5a0a1b2_EOF | "$GH_AW_NODE" "${RUNNER_TEMP}/gh-aw/actions/start_mcp_gateway.cjs"
+          cat << GH_AW_MCP_CONFIG_8599193af19f95e5_EOF | "$GH_AW_NODE" "${RUNNER_TEMP}/gh-aw/actions/start_mcp_gateway.cjs"
           {
             "mcpServers": {
               "github": {
@@ -862,7 +876,7 @@ jobs:
               "payloadDir": "${MCP_GATEWAY_PAYLOAD_DIR}"
             }
           }
-          GH_AW_MCP_CONFIG_e20827bda5a0a1b2_EOF
+          GH_AW_MCP_CONFIG_8599193af19f95e5_EOF
       - name: Mount MCP servers as CLIs
         id: mount-mcp-clis
         continue-on-error: true

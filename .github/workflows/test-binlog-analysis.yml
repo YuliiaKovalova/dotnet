@@ -140,6 +140,18 @@ jobs:
             try { errors = fs.readFileSync('/tmp/binlog-data/binlog-errors.json', 'utf8'); } catch {}
             try { warnings = fs.readFileSync('/tmp/binlog-data/binlog-warnings.json', 'utf8'); } catch {}
 
+            // Parse overview - it's a JSON string that may contain Unicode escapes
+            let overviewText = '';
+            try {
+              const parsed = JSON.parse(overview);
+              overviewText = typeof parsed === 'string' ? parsed : JSON.stringify(parsed, null, 2);
+            } catch {
+              overviewText = overview;
+            }
+            // Clean up Windows paths for readability
+            overviewText = overviewText.replace(/D:\\a\\_work\\1\\s\\/g, '');
+
+            // Parse errors - may be double-encoded JSON
             let parsedErrors = [];
             try { parsedErrors = JSON.parse(errors); } catch {}
             if (typeof parsedErrors === 'string') {
@@ -149,9 +161,11 @@ jobs:
 
             let errorTable = '';
             if (parsedErrors.length > 0) {
-              const rows = parsedErrors.slice(0, 30).map(e =>
-                `| \`${e.code || '—'}\` | ${e.file ? e.file.split('/').slice(-2).join('/') : '—'}:${e.line || ''} | ${(e.message || '').substring(0, 120)} |`
-              ).join('\n');
+              const rows = parsedErrors.filter(e => e.code).slice(0, 30).map(e => {
+                const file = e.file ? e.file.replace(/D:\\a\\_work\\1\\s\\/g, '').replace(/\\/g, '/') : '—';
+                const shortFile = file.split('/').slice(-2).join('/');
+                return `| \`${e.code}\` | ${shortFile}:${e.line || ''} | ${(e.message || '').substring(0, 120)} |`;
+              }).join('\n');
               errorTable = `| Code | File | Message |\n| ---- | ---- | ------- |\n${rows}`;
             }
 
@@ -166,7 +180,7 @@ jobs:
               '',
               '### 📊 Build Overview',
               '```',
-              typeof overview === 'string' ? overview.replace(/\\n/g, '\n').replace(/^"|"$/g, '') : JSON.stringify(overview, null, 2),
+              overviewText,
               '```',
               '',
               parsedErrors.length > 0 ? `### ❌ Errors (${parsedErrors.length})` : '### ✅ No MSBuild errors in this build leg',

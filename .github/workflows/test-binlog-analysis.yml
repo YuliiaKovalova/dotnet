@@ -116,3 +116,82 @@ jobs:
           echo ""
           echo "=== Warnings ==="
           cat /tmp/binlog-data/binlog-warnings.json 2>/dev/null | head -20 || echo "No warnings"
+
+      - name: Post analysis to PR
+        if: steps.download.outputs.found == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const prNumber = parseInt('${{ inputs.pr-number }}');
+            if (!prNumber) { core.info('No PR number, skipping comment'); return; }
+
+            let overview = '', errors = '', warnings = '';
+            try { overview = fs.readFileSync('/tmp/binlog-data/binlog-overview.json', 'utf8'); } catch {}
+            try { errors = fs.readFileSync('/tmp/binlog-data/binlog-errors.json', 'utf8'); } catch {}
+            try { warnings = fs.readFileSync('/tmp/binlog-data/binlog-warnings.json', 'utf8'); } catch {}
+
+            // Parse errors for the table
+            let parsedErrors = [];
+            try { parsedErrors = JSON.parse(errors); } catch {}
+            if (typeof parsedErrors === 'string') {
+              try { parsedErrors = JSON.parse(parsedErrors); } catch {}
+            }
+            if (!Array.isArray(parsedErrors)) parsedErrors = [];
+
+            let errorTable = '';
+            if (parsedErrors.length > 0) {
+              const rows = parsedErrors.slice(0, 30).map(e =>
+                `| \`${e.code || '—'}\` | ${e.file ? e.file.split('/').slice(-2).join('/') : '—'}:${e.line || ''} | ${(e.message || '').substring(0, 120)} |`
+              ).join('\n');
+              errorTable = `| Code | File | Message |\n| ---- | ---- | ------- |\n${rows}`;
+            }
+
+            const buildId = '${{ inputs.azdo-build-id }}';
+            const azdoUrl = `https://dev.azure.com/dnceng-public/public/_build/results?buildId=${buildId}`;
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+
+            const marker = '<!-- binlog-failure-analysis -->';
+            const body = [
+              marker,
+              '## 🔍 Build Failure Analysis',
+              '',
+              '### 📊 Build Overview',
+              '```',
+              typeof overview === 'string' ? overview.replace(/\\n/g, '\n').replace(/^"|"$/g, '') : JSON.stringify(overview, null, 2),
+              '```',
+              '',
+              parsedErrors.length > 0 ? `### ❌ Errors (${parsedErrors.length})` : '### ✅ No errors found',
+              '',
+              errorTable || '_No MSBuild errors captured in this build leg._',
+              '',
+              '---',
+              `<sub>🤖 Generated from [AzDO build ${buildId}](${azdoUrl}) · [workflow run](${runUrl})</sub>`,
+            ].join('\n');
+
+            // Update or create comment
+            const allComments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner: context.repo.owner, repo: context.repo.repo, issue_number: prNumber, per_page: 100 },
+            );
+            const existing = allComments.filter(c => c.body.includes(marker));
+            const latest = existing[existing.length - 1];
+
+            if (latest) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: latest.id, body,
+              });
+              for (const old of existing.slice(0, -1)) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner, repo: context.repo.repo, comment_id: old.id,
+                });
+              }
+              core.info(`Updated comment on PR #${prNumber}`);
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: prNumber, body,
+              });
+              core.info(`Posted comment on PR #${prNumber}`);
+            }

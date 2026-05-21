@@ -96,9 +96,13 @@ steps:
         unzip -qo "/tmp/azdo-artifacts/${NAME}.zip" -d /tmp/azdo-artifacts/ 2>/dev/null || true
       done
 
-      # Find binlogs in downloaded artifacts
-      BINLOG=$(find /tmp/azdo-artifacts -name '*.binlog' -type f -printf '%s %p\n' 2>/dev/null \
-        | sort -rn | head -1 | cut -d' ' -f2-)
+      # Pick the top-level VMR orchestration binlog (no repo subdir between Release/ and Build.binlog)
+      BINLOG=$(find /tmp/azdo-artifacts -path '*/artifacts/log/Release/Build.binlog' -not -path '*/Release/*/Build.binlog' -type f 2>/dev/null | head -1)
+      if [ -z "$BINLOG" ]; then
+        # Fallback: largest binlog
+        BINLOG=$(find /tmp/azdo-artifacts -name '*.binlog' -type f -printf '%s %p\n' 2>/dev/null \
+          | sort -rn | head -1 | cut -d' ' -f2-)
+      fi
 
       if [ -n "$BINLOG" ] && [ -f "$BINLOG" ]; then
         echo "Found binlog: $BINLOG ($(du -h "$BINLOG" | cut -f1))"

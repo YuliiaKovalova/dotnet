@@ -12,10 +12,10 @@ on:
         required: false
         type: string
       pr-number:
-        description: "GitHub PR number (for context only)"
+        description: "GitHub PR number to post comment to"
         required: false
         type: string
-        default: "6720"
+        default: "1"
 
 permissions:
   contents: read
@@ -46,25 +46,21 @@ jobs:
           if [ -n "$SPECIFIC" ]; then
             ARTIFACT_NAME="$SPECIFIC"
           else
-            # Find failed jobs first, then pick their BuildLogs artifact
+            # Auto-detect: find failed jobs, pick their BuildLogs artifact
             TIMELINE=$(curl -sf \
               "https://dev.azure.com/dnceng-public/public/_apis/build/builds/${BUILD_ID}/timeline?api-version=7.1")
             FAILED_JOB=$(echo "$TIMELINE" | jq -r '[.records[] | select(.type=="Job" and .result=="failed")] | .[0].name // empty')
-
             if [ -n "$FAILED_JOB" ]; then
-              # Try to find a BuildLogs artifact matching the failed job name
               ARTIFACT_NAME=$(echo "$ARTIFACTS" | jq -r --arg job "$FAILED_JOB" \
                 '[.value[] | select(.name | test("BuildLogs"; "i")) | select(.name | test($job; "i"))] | .[0].name // empty')
             fi
-
-            # Fallback: pick the smallest BuildLogs artifact
             if [ -z "$ARTIFACT_NAME" ]; then
               ARTIFACT_NAME=$(echo "$ARTIFACTS" | jq -r \
                 '[.value[] | select(.name | test("BuildLogs"; "i"))] | sort_by(.resource.properties.artifactsize) | .[0].name // empty')
             fi
           fi
 
-          if [ "$ARTIFACT_NAME" = "null" ] || [ -z "$ARTIFACT_NAME" ]; then
+          if [ -z "$ARTIFACT_NAME" ] || [ "$ARTIFACT_NAME" = "null" ]; then
             echo "No BuildLogs artifacts found"
             echo "found=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -77,33 +73,24 @@ jobs:
           echo "Extracting..."
           unzip -qo /tmp/azdo-artifacts/logs.zip -d /tmp/azdo-artifacts/ 2>/dev/null || true
 
-<<<<<<< HEAD
-          # The top-level Build.binlog is the VMR orchestration log that contains
-          # all errors across repos. Pick it first; fall back to largest.
-          TOP_BINLOG=$(find /tmp/azdo-artifacts -maxdepth 4 -name 'Build.binlog' -path '*/log/Release/Build.binlog' -type f 2>/dev/null | head -1)
-          BINLOG="${TOP_BINLOG}"
-          if [ -z "$BINLOG" ]; then
-            BINLOG=$(find /tmp/azdo-artifacts -name '*.binlog' -type f -printf '%s %p\n' 2>/dev/null \
-              | sort -rn | head -1 | cut -d' ' -f2-)
-          fi
-=======
-          # List all binlogs for debugging
+          # List all binlogs
           echo "All binlogs found:"
           find /tmp/azdo-artifacts -name '*.binlog' -type f 2>/dev/null | while read f; do echo "  $(du -h "$f" | cut -f1) $f"; done
 
-          # The top-level Build.binlog (no repo subdir) is the VMR orchestration log
-          TOP_BINLOG=$(find /tmp/azdo-artifacts -path '*/artifacts/log/Release/Build.binlog' -not -path '*/Release/*/Build.binlog' -type f 2>/dev/null | head -1)
-          BINLOG="${TOP_BINLOG}"
+          # Pick the top-level VMR orchestration binlog (no repo subdir between Release/ and Build.binlog)
+          BINLOG=$(find /tmp/azdo-artifacts -path '*/artifacts/log/Release/Build.binlog' -not -path '*/Release/*/Build.binlog' -type f 2>/dev/null | head -1)
+
+          # Fallback: largest binlog
           if [ -z "$BINLOG" ]; then
-            # Fallback: largest binlog
+            echo "No top-level binlog found, falling back to largest"
             BINLOG=$(find /tmp/azdo-artifacts -name '*.binlog' -type f -printf '%s %p\n' 2>/dev/null \
               | sort -rn | head -1 | cut -d' ' -f2-)
           fi
+
           echo "Selected: $BINLOG"
->>>>>>> 04de4d027 (Fix: select top-level VMR binlog, not per-repo runtime binlog)
 
           if [ -n "$BINLOG" ] && [ -f "$BINLOG" ]; then
-            echo "Found binlog: $BINLOG ($(du -h "$BINLOG" | cut -f1))"
+            echo "Binlog size: $(du -h "$BINLOG" | cut -f1)"
             echo "found=true" >> "$GITHUB_OUTPUT"
             echo "path=$BINLOG" >> "$GITHUB_OUTPUT"
           else
@@ -153,7 +140,6 @@ jobs:
             try { errors = fs.readFileSync('/tmp/binlog-data/binlog-errors.json', 'utf8'); } catch {}
             try { warnings = fs.readFileSync('/tmp/binlog-data/binlog-warnings.json', 'utf8'); } catch {}
 
-            // Parse errors for the table
             let parsedErrors = [];
             try { parsedErrors = JSON.parse(errors); } catch {}
             if (typeof parsedErrors === 'string') {
@@ -183,15 +169,14 @@ jobs:
               typeof overview === 'string' ? overview.replace(/\\n/g, '\n').replace(/^"|"$/g, '') : JSON.stringify(overview, null, 2),
               '```',
               '',
-              parsedErrors.length > 0 ? `### ❌ Errors (${parsedErrors.length})` : '### ✅ No errors found',
+              parsedErrors.length > 0 ? `### ❌ Errors (${parsedErrors.length})` : '### ✅ No MSBuild errors in this build leg',
               '',
-              errorTable || '_No MSBuild errors captured in this build leg._',
+              errorTable || '_No MSBuild compilation errors captured. The build failure may be in tests or post-build validation — check the [AzDO build](' + azdoUrl + ') for details._',
               '',
               '---',
               `<sub>🤖 Generated from [AzDO build ${buildId}](${azdoUrl}) · [workflow run](${runUrl})</sub>`,
             ].join('\n');
 
-            // Update or create comment
             const allComments = await github.paginate(
               github.rest.issues.listComments,
               { owner: context.repo.owner, repo: context.repo.repo, issue_number: prNumber, per_page: 100 },
